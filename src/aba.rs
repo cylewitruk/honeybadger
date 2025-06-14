@@ -152,37 +152,37 @@ impl BinaryByzantineAgreement {
         match &message.pub_content {
             // Added early return for old rounds if decided.
             AbaMessageContent::Est { value, round } => {
-                if *round >= self.current_round {
-                    // Process current or future round messages
+                if *round == self.current_round {
                     let round_ests = self.est_values.entry(*round).or_default();
                     round_ests.insert(sender_id, *value);
-
-                    // Check for N-F EST(v) to send AUX(v)
-                    // This check and response generation needs to be more robust.
-                    // E.g. what if we receive messages for future rounds? Queue them.
-                    // For now, only process for current_round strictly or if it's the round we are
-                    // in.
-                    if *round == self.current_round {
-                        let sub_output = self.try_send_aux(*round)?;
-                        output.messages_to_send.extend(sub_output.messages_to_send);
-                        if sub_output.timer_request_to_set.is_some() {
-                            output.timer_request_to_set = sub_output.timer_request_to_set;
-                        }
-                    }
+                    let sub_output = self.try_send_aux(*round)?;
+                    output.messages_to_send.extend(sub_output.messages_to_send);
+                    // try_send_aux does not set timers, so no need to update
+                    // output.timer_request_to_set
+                } else if *round > self.current_round {
+                    // Queue for future round
+                    let round_ests = self.est_values.entry(*round).or_default();
+                    round_ests.insert(sender_id, *value);
+                    // No immediate response or timer change from a future message
                 }
+                // Implicitly ignore messages for *round < self.current_round if not decided
             }
             AbaMessageContent::Aux { value, round } => {
-                if *round >= self.current_round {
+                if *round == self.current_round {
                     let round_auxs = self.aux_values.entry(*round).or_default();
                     round_auxs.insert(sender_id, *value);
-                    if *round == self.current_round {
-                        // Only try to decide/advance based on current round's AUX
-                        let sub_output = self.try_decide_or_advance_round(*round)?;
-                        output.messages_to_send.extend(sub_output.messages_to_send);
-                        if sub_output.timer_request_to_set.is_some() {
-                            output.timer_request_to_set = sub_output.timer_request_to_set;
-                        }
+                    let sub_output = self.try_decide_or_advance_round(*round)?;
+                    output.messages_to_send.extend(sub_output.messages_to_send);
+                    // If try_decide_or_advance_round started a new round or decided,
+                    // its timer_request_to_set will be authoritative.
+                    if sub_output.timer_request_to_set.is_some() || self.is_decided() {
+                        output.timer_request_to_set = sub_output.timer_request_to_set;
                     }
+                } else if *round > self.current_round {
+                    // Queue for future round
+                    let round_auxs = self.aux_values.entry(*round).or_default();
+                    round_auxs.insert(sender_id, *value);
+                    // No immediate response or timer change from a future message
                 }
             }
             AbaMessageContent::Coin { .. } => { // Removed Conf handling
@@ -239,9 +239,8 @@ impl BinaryByzantineAgreement {
         &mut self,
         round: AbaRound,
     ) -> Result<AbaProcessOutput, HbbftError> {
-        let output = AbaProcessOutput::default();
         if self.is_decided() {
-            return Ok(output);
+            return Ok(AbaProcessOutput::default());
         }
 
         if let Some(auxs_for_round) = self.aux_values.get(&round) {
@@ -267,7 +266,7 @@ impl BinaryByzantineAgreement {
                     // DbgPrint!("[ABA ({},{},R{})] DECIDED on {}", self.batch_proposer_id,
                     // self.epoch, round, decided_val); Optionally, could
                     // broadcast a DECIDE message or rely on others reaching same state.
-                    // For HBBFT, decision is used internally.
+                    return Ok(AbaProcessOutput::default()); // Decided, no new messages or timer.
                 } else {
                     // |conf_values| > 1 (e.g. {0,1}), since it's not empty and not 1.
                     // A common condition is: if any value v has F+1 AUX messages,
@@ -284,7 +283,7 @@ impl BinaryByzantineAgreement {
                 // 1`. This is step 1.3 in your ROADMAP.md.
             }
         }
-        Ok(output)
+        Ok(AbaProcessOutput::default())
     }
 
     /// Handles a timeout for a specific ABA round.
@@ -324,6 +323,10 @@ impl BinaryByzantineAgreement {
             )
         })?;
 
+        // DbgPrint!("[ABA ({},{},R{})] Starting new round. Estimate from coin (for prev round {}):
+        // {}", self.batch_proposer_id, self.epoch, self.current_round, self.current_round -1,
+        // val_to_propose);
+
         self.current_estimate = Some(val_to_propose); // Set estimate for new round
         self.sent_est.insert(self.current_round, true);
         // DbgPrint!("[ABA ({},{},R{})] Starting new round {}. Estimate from coin (for prev round):
@@ -338,15 +341,62 @@ impl BinaryByzantineAgreement {
             },
             pub_sender_id: self.own_id,
         };
-        let timer_request = TimerRequest::SetAbaRoundTimeout {
+        let initial_timer_request = TimerRequest::SetAbaRoundTimeout {
             epoch: self.epoch,
             batch_proposer_id: self.batch_proposer_id,
             round: self.current_round,
         };
-        Ok(AbaProcessOutput {
-            messages_to_send: vec![est_message],
-            timer_request_to_set: Some(timer_request),
-        })
+
+        let mut messages_to_send = vec![est_message];
+        let mut current_timer_request = Some(initial_timer_request);
+
+        // Process any messages that might have been queued for this new self.current_round
+        // This might lead to sending AUX, deciding, or even starting another round.
+        let processing_queued_output = self.process_potential_progress_for_current_round()?;
+        messages_to_send.extend(processing_queued_output.messages_to_send);
+
+        if self.is_decided() {
+            // If processing queued led to a decision
+            current_timer_request = None;
+        } else if processing_queued_output.timer_request_to_set.is_some() {
+            // If processing queued led to starting an even newer round (e.g. round + 1), use its
+            // timer.
+            current_timer_request = processing_queued_output.timer_request_to_set;
+        }
+        // Otherwise, the initial_timer_request for self.current_round remains.
+
+        Ok(AbaProcessOutput { messages_to_send, timer_request_to_set: current_timer_request })
+    }
+
+    /// Helper to process ESTs and AUXs that might have been queued for the current round.
+    /// This is called when a round starts.
+    fn process_potential_progress_for_current_round(
+        &mut self,
+    ) -> Result<AbaProcessOutput, HbbftError> {
+        let mut combined_output = AbaProcessOutput::default();
+
+        if self.is_decided() {
+            return Ok(combined_output);
+        }
+
+        // Try to send AUX based on current ESTs (which might include previously queued ones for
+        // this round)
+        let aux_output = self.try_send_aux(self.current_round)?;
+        combined_output
+            .messages_to_send
+            .extend(aux_output.messages_to_send);
+        // try_send_aux doesn't set timers or decide on its own.
+
+        // Try to decide or advance round based on current AUXs (which might include previously
+        // queued ones for this round)
+        let decide_output = self.try_decide_or_advance_round(self.current_round)?;
+        combined_output
+            .messages_to_send
+            .extend(decide_output.messages_to_send);
+        // This one can set a timer if it starts a new round, or clear it (None) if it decides.
+        combined_output.timer_request_to_set = decide_output.timer_request_to_set;
+
+        Ok(combined_output)
     }
 
     /// Returns the decided value if this ABA instance has terminated.
