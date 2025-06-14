@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::EpochNum;
 use crate::types::NodeId;
 
 #[derive(Clone, Debug)]
@@ -16,6 +17,8 @@ pub struct HoneyBadgerConfig {
                                          *   practical implementations might use timeouts)
                                          * - Threshold crypto public keys / key shares
                                          * - Max batch size, etc. */
+    // Number of recent finalized epochs for which to retain detailed protocol state.
+    pub epochs_to_retain_state: EpochNum,
 }
 
 impl HoneyBadgerConfig {
@@ -23,6 +26,7 @@ impl HoneyBadgerConfig {
         own_id: NodeId,
         all_node_ids: BTreeSet<NodeId>,
         num_faulty_nodes: usize,
+        epochs_to_retain_state: EpochNum, // New parameter
     ) -> Result<Self, String> {
         let num_total_nodes = all_node_ids.len();
         if num_total_nodes == 0 {
@@ -41,12 +45,17 @@ impl HoneyBadgerConfig {
         if !all_node_ids.contains(&own_id) {
             return Err(format!("Own ID {own_id} not found in the set of all node IDs."));
         }
+        if epochs_to_retain_state == 0 {
+            // Require at least 1 to avoid ambiguity or overly aggressive pruning.
+            return Err("epochs_to_retain_state must be at least 1.".to_string());
+        }
 
         Ok(HoneyBadgerConfig {
             own_id,
             all_node_ids,
-            num_total_nodes,  // Corrected: remove pub from here
-            num_faulty_nodes, // Corrected: remove pub from here
+            num_total_nodes,
+            num_faulty_nodes,
+            epochs_to_retain_state,
         })
     }
 

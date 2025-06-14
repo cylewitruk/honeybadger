@@ -508,6 +508,8 @@ impl HoneyBadgerBft {
                 output
                     .timer_requests_to_set
                     .extend(next_epoch_proposal_output.timer_requests_to_set);
+
+                self.prune_old_epoch_state(); // Call pruning after successful finalization and epoch advancement
             }
             return Ok(output);
         }
@@ -545,5 +547,45 @@ impl HoneyBadgerBft {
         // indirectly via its own call to `ensure_epoch_instances` which we've now wrapped.
         // The `propose_batch` method itself will now correctly generate initial RBC timer requests.
         self.propose_batch(txs_to_propose, self.current_epoch) // This will internally handle timer requests for the new epoch
+    }
+
+    /// Prunes state for epochs that are older than the retention window.
+    fn prune_old_epoch_state(&mut self) {
+        let epochs_to_retain = self.config.epochs_to_retain_state;
+
+        // Find the highest epoch number that has been finalized.
+        // self.decided_epoch_outputs is a BTreeMap, so iter().next_back() gives the highest epoch.
+        if let Some((&max_finalized_epoch, _)) = self.decided_epoch_outputs.iter().next_back() {
+            // We want to keep `epochs_to_retain` number of finalized epochs.
+            // So, if epochs_to_retain is 3, and max_finalized_epoch is 10, we keep 10, 9, 8.
+            // This means we prune epochs strictly less than 8.
+            // The oldest epoch we keep details for is
+            // max_finalized_epoch.saturating_sub(epochs_to_retain - 1).
+            let oldest_epoch_to_keep_details =
+                max_finalized_epoch.saturating_sub(epochs_to_retain - 1);
+
+            // DbgPrint!(
+            //     "[HBBFT Pruning] Max finalized epoch: {}, Retaining: {} epochs. Pruning epochs
+            // older than {}.",     max_finalized_epoch, epochs_to_retain,
+            // oldest_epoch_to_keep_details );
+
+            self.rbc_instances
+                .retain(|&epoch, _| epoch >= oldest_epoch_to_keep_details);
+            self.aba_instances
+                .retain(|&epoch, _| epoch >= oldest_epoch_to_keep_details);
+            self.my_epoch_proposals
+                .retain(|&epoch, _| epoch >= oldest_epoch_to_keep_details);
+            self.rbc_outputs
+                .retain(|&epoch, _| epoch >= oldest_epoch_to_keep_details);
+            self.aba_outputs
+                .retain(|&epoch, _| epoch >= oldest_epoch_to_keep_details);
+
+            // Prune the application-level decided outputs as well.
+            // The application is responsible for longer-term persistence if needed.
+            self.decided_epoch_outputs
+                .retain(|&epoch, _| epoch >= oldest_epoch_to_keep_details);
+        }
+        // If decided_epoch_outputs is empty, no finalized epochs yet, so nothing to prune based on
+        // this logic.
     }
 }
