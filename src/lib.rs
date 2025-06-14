@@ -24,6 +24,7 @@ pub use types::{
     HbbftProcessOutput, // Bundles messages, decisions, and timer requests
     HoneyBadgerMessage, // Envelope for network messages
     NodeId,
+    TimerExpiry,  // For application to notify HBBFT of timer events
     TimerRequest, // For application-managed timers
     Transaction,
 };

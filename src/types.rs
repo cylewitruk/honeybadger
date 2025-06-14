@@ -40,7 +40,7 @@ pub fn hash_batch(batch: &Batch) -> BatchHash {
     for tx in &batch.transactions {
         // Prefix with length to avoid ambiguities, e.g. hash(tx1 || tx2) vs hash(tx1_prefix_of_txA
         // || txA_suffix_same_as_tx2)
-        hasher.update(&(tx.len() as u64).to_le_bytes());
+        hasher.update((tx.len() as u64).to_le_bytes());
         hasher.update(tx);
     }
     let result = hasher.finalize();
@@ -104,7 +104,16 @@ pub enum TimerRequest {
         // Note: The actual duration of the timeout will be determined by the
         // consuming application based on its configuration or heuristics.
     },
-    // Potentially other timer requests like SetRbcTimeout in the future.
+    SetRbcTimeout {
+        epoch: EpochNum,
+        proposer_id: NodeId, // The proposer of the RBC instance
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimerExpiry {
+    AbaRoundTimeout { epoch: EpochNum, batch_proposer_id: NodeId, round: AbaRound },
+    RbcTimeout { epoch: EpochNum, proposer_id: NodeId },
 }
 
 // --- Output Structures ---

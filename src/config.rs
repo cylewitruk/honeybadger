@@ -34,12 +34,12 @@ impl HoneyBadgerConfig {
         // Common HBBFT requirement: N >= 3F + 1
         if num_total_nodes < 3 * num_faulty_nodes + 1 {
             return Err(format!(
-                "Invalid configuration: N ({}) must be >= 3F ({}) + 1. N={} F={}",
-                num_total_nodes, num_faulty_nodes, num_total_nodes, num_faulty_nodes
+                "Invalid configuration: N ({num_total_nodes}) must be >= 3F ({num_faulty_nodes}) \
+                 + 1. N={num_total_nodes} F={num_faulty_nodes}"
             ));
         }
         if !all_node_ids.contains(&own_id) {
-            return Err(format!("Own ID {} not found in the set of all node IDs.", own_id));
+            return Err(format!("Own ID {own_id} not found in the set of all node IDs."));
         }
 
         Ok(HoneyBadgerConfig {

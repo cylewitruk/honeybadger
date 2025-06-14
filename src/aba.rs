@@ -154,7 +154,7 @@ impl BinaryByzantineAgreement {
             AbaMessageContent::Est { value, round } => {
                 if *round >= self.current_round {
                     // Process current or future round messages
-                    let round_ests = self.est_values.entry(*round).or_insert_with(HashMap::new);
+                    let round_ests = self.est_values.entry(*round).or_default();
                     round_ests.insert(sender_id, *value);
 
                     // Check for N-F EST(v) to send AUX(v)
@@ -173,7 +173,7 @@ impl BinaryByzantineAgreement {
             }
             AbaMessageContent::Aux { value, round } => {
                 if *round >= self.current_round {
-                    let round_auxs = self.aux_values.entry(*round).or_insert_with(HashMap::new);
+                    let round_auxs = self.aux_values.entry(*round).or_default();
                     round_auxs.insert(sender_id, *value);
                     if *round == self.current_round {
                         // Only try to decide/advance based on current round's AUX
@@ -356,5 +356,10 @@ impl BinaryByzantineAgreement {
 
     pub fn is_decided(&self) -> bool {
         self.decided_value.is_some()
+    }
+
+    /// Returns the current round number of this ABA instance (for debugging/checks).
+    pub fn current_round_debug(&self) -> AbaRound {
+        self.current_round
     }
 }

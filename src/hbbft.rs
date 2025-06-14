@@ -8,7 +8,7 @@ use crate::config::HoneyBadgerConfig;
 use crate::rbc::ReliableBroadcast;
 use crate::types::{
     AbaProcessOutput, Batch, DecidedBatch, EpochNum, EpochOutput, HbbftError, HbbftProcessOutput,
-    HoneyBadgerMessage, NodeId, Transaction,
+    HoneyBadgerMessage, NodeId, TimerExpiry, TimerRequest, Transaction,
 };
 
 // Represents the state of HoneyBadgerBFT for a single node.
@@ -93,7 +93,11 @@ impl HoneyBadgerBft {
             .insert(epoch_num, batch_to_propose.clone());
 
         // Initialize RBC and ABA instances for this epoch if not already present
-        self.ensure_epoch_instances(epoch_num);
+        // and get timer requests for other proposers' RBCs.
+        let mut hbbft_output = HbbftProcessOutput::default();
+        if let Some(timer_reqs) = self.ensure_epoch_active_and_get_timers(epoch_num) {
+            hbbft_output.timer_requests_to_set.extend(timer_reqs);
+        }
 
         let mut hbbft_output = HbbftProcessOutput::default();
 
@@ -139,7 +143,10 @@ impl HoneyBadgerBft {
         }
 
         // Initialize instances for the message's epoch if it's new to us and not too old.
-        self.ensure_epoch_instances(message_epoch);
+        let mut hbbft_output = HbbftProcessOutput::default();
+        if let Some(timer_reqs) = self.ensure_epoch_active_and_get_timers(message_epoch) {
+            hbbft_output.timer_requests_to_set.extend(timer_reqs);
+        }
 
         let mut hbbft_output = HbbftProcessOutput::default();
 
@@ -160,7 +167,7 @@ impl HoneyBadgerBft {
                         let output_already_recorded = self
                             .rbc_outputs
                             .get(&message_epoch)
-                            .map_or(false, |epoch_map| epoch_map.contains_key(&proposer_id));
+                            .is_some_and(|epoch_map| epoch_map.contains_key(&proposer_id));
 
                         // Check if this RBC instance just decided and we haven't recorded its
                         // output yet
@@ -226,24 +233,90 @@ impl HoneyBadgerBft {
         if message_epoch >= self.current_epoch
             && !self.decided_epoch_outputs.contains_key(&message_epoch)
         {
-            if let Some(final_output) = self.try_finalize_epoch(message_epoch)? {
-                hbbft_output.newly_decided_batches.extend(final_output);
-            }
+            let finalize_output = self.try_finalize_epoch(message_epoch)?;
+            hbbft_output
+                .newly_decided_batches
+                .extend(finalize_output.newly_decided_batches);
+            hbbft_output
+                .messages_to_send
+                .extend(finalize_output.messages_to_send);
+            hbbft_output
+                .timer_requests_to_set
+                .extend(finalize_output.timer_requests_to_set);
         }
 
         Ok(hbbft_output)
     }
 
+    /// Handles a timer expiry event notified by the consuming application.
+    pub fn handle_timer_expiry(
+        &mut self,
+        expiry: TimerExpiry,
+    ) -> Result<HbbftProcessOutput, HbbftError> {
+        let mut hbbft_output = HbbftProcessOutput::default();
+
+        match expiry {
+            TimerExpiry::AbaRoundTimeout { epoch, batch_proposer_id, round } => {
+                // DbgPrint!("[HBBFT Epoch {}] Received ABA Round Timeout for proposer {}, round
+                // {}", epoch, batch_proposer_id, round);
+                if let Some(aba_epoch_map) = self.aba_instances.get_mut(&epoch) {
+                    if let Some(aba_instance) = aba_epoch_map.get_mut(&batch_proposer_id) {
+                        if !aba_instance.is_decided() && round == aba_instance.current_round_debug()
+                        {
+                            // Add current_round_debug() to ABA
+                            let aba_proc_output = aba_instance.handle_round_timeout(round)?;
+                            hbbft_output.messages_to_send.extend(
+                                aba_proc_output
+                                    .messages_to_send
+                                    .into_iter()
+                                    .map(HoneyBadgerMessage::Aba),
+                            );
+                            if let Some(timer_req) = aba_proc_output.timer_request_to_set {
+                                hbbft_output.timer_requests_to_set.push(timer_req);
+                            }
+                        }
+                    }
+                }
+            }
+            TimerExpiry::RbcTimeout { epoch, proposer_id } => {
+                // DbgPrint!("[HBBFT Epoch {}] Received RBC Timeout for proposer {}", epoch,
+                // proposer_id);
+                let rbc_has_delivered = self
+                    .rbc_outputs
+                    .get(&epoch)
+                    .is_some_and(|epoch_map| epoch_map.contains_key(&proposer_id));
+
+                if !rbc_has_delivered {
+                    // DbgPrint!("[HBBFT Epoch {}] RBC for {} timed out. Initiating ABA with
+                    // false.", epoch, proposer_id);
+                    let aba_init_output = self.initiate_aba_for_rbc(epoch, proposer_id, false)?;
+                    hbbft_output.messages_to_send.extend(
+                        aba_init_output
+                            .messages_to_send
+                            .into_iter()
+                            .map(HoneyBadgerMessage::Aba),
+                    );
+                    if let Some(timer_req) = aba_init_output.timer_request_to_set {
+                        hbbft_output.timer_requests_to_set.push(timer_req);
+                    }
+                } else {
+                    // DbgPrint!("[HBBFT Epoch {}] RBC for {} timed out, but already delivered. No
+                    // action.", epoch, proposer_id);
+                }
+            }
+        }
+        Ok(hbbft_output)
+    }
+
     /// Creates RBC and ABA instances for all N nodes for a given epoch if they don't exist.
-    fn ensure_epoch_instances(&mut self, epoch_num: EpochNum) {
+    /// This is an internal helper, primarily for instance creation.
+    fn ensure_epoch_instances_internal(&mut self, epoch_num: EpochNum) {
         if epoch_num < self.current_epoch && self.decided_epoch_outputs.contains_key(&epoch_num) {
             return; // Don't create for already decided old epochs
         }
 
         let own_id = self.own_id;
         let shared_config = Arc::new(self.config.clone()); // Create an Arc for the config
-
-        // Ensure RBC instances
         self.rbc_instances.entry(epoch_num).or_insert_with(|| {
             shared_config
                 .all_node_ids
@@ -259,8 +332,6 @@ impl HoneyBadgerBft {
                 })
                 .collect()
         });
-
-        // Ensure ABA instances
         self.aba_instances.entry(epoch_num).or_insert_with(|| {
             shared_config
                 .all_node_ids
@@ -280,23 +351,51 @@ impl HoneyBadgerBft {
                 })
                 .collect()
         });
-
-        // If this is for an epoch where our RBC hasn't delivered a value yet,
-        // and all other RBCs have been processed (or timed out),
-        // we might need to input `false` to our own ABA.
-        // HBBFT is designed such that each node `j` eventually provides a value `v_j` to `ACS_j`.
-        // The `RBC_j` ensures `v_j` is decided.
-        // If an RBC_k (for k != self.own_id) doesn't deliver, eventually we need to input false
-        // into ABA_k. This "timeout" or lack-of-RBC-output condition needs to be handled.
-        // For now, initiate_aba_for_rbc is called when RBC_output is available.
-        // We may need a mechanism to eventually propose 'false' to ABAs for RBCs that don't
-        // deliver.
     }
 
-    fn rbc_output_exists(&self, epoch_num: EpochNum, proposer_id: NodeId) -> bool {
-        self.rbc_outputs
-            .get(&epoch_num)
-            .map_or(false, |epoch_map| epoch_map.contains_key(&proposer_id))
+    /// Ensures instances for an epoch are created and returns TimerRequests for RBCs
+    /// of other proposers if their output is not yet known.
+    fn ensure_epoch_active_and_get_timers(
+        &mut self,
+        epoch_num: EpochNum,
+    ) -> Option<Vec<TimerRequest>> {
+        if epoch_num < self.current_epoch && self.decided_epoch_outputs.contains_key(&epoch_num) {
+            return None; // Don't process for already decided old epochs
+        }
+
+        // Ensure instances are created if they don't exist for this epoch
+        let instances_existed_before = self.rbc_instances.contains_key(&epoch_num);
+        if !instances_existed_before {
+            self.ensure_epoch_instances_internal(epoch_num);
+        }
+
+        let mut rbc_timer_requests = Vec::new();
+
+        // For all other proposers in this epoch:
+        for proposer_id_ref in self.config.all_node_ids.iter() {
+            let proposer_id = *proposer_id_ref;
+            if proposer_id == self.own_id {
+                continue; // Don't set RBC timeout for our own proposal this way
+            }
+
+            // If we don't have the output for this RBC yet:
+            if !self
+                .rbc_outputs
+                .get(&epoch_num)
+                .is_some_and(|epoch_map| epoch_map.contains_key(&proposer_id))
+            {
+                // And if we haven't already requested a timer (heuristic: only if instances were
+                // just created) A more robust system would track requested timers
+                // explicitly. For now, we request if instances were new OR if we
+                // simply don't have the output. The application layer should make
+                // timer setting idempotent. DbgPrint!("[HBBFT Epoch {}] Requesting
+                // RBC Timeout for proposer {}", epoch_num, proposer_id);
+                rbc_timer_requests
+                    .push(TimerRequest::SetRbcTimeout { epoch: epoch_num, proposer_id });
+            }
+        }
+
+        if rbc_timer_requests.is_empty() { None } else { Some(rbc_timer_requests) }
     }
 
     fn store_rbc_output(&mut self, epoch_num: EpochNum, proposer_id: NodeId, batch: Batch) {
@@ -341,14 +440,17 @@ impl HoneyBadgerBft {
     fn try_finalize_epoch(
         &mut self,
         epoch_num: EpochNum,
-    ) -> Result<Option<Vec<DecidedBatch>>, HbbftError> {
+    ) -> Result<HbbftProcessOutput, HbbftError> {
+        // Changed return type
+        let mut output = HbbftProcessOutput::default();
         if self.decided_epoch_outputs.contains_key(&epoch_num) {
-            return Ok(None); // Already finalized
+            return Ok(output); // Already finalized, return empty output
         }
 
         let num_nodes = self.config.num_total_nodes;
         let mut all_abas_decided = false;
         if let Some(epoch_aba_outputs) = self.aba_outputs.get(&epoch_num) {
+            // Ensure this is Some before checking len
             if epoch_aba_outputs.len() == num_nodes {
                 all_abas_decided = true;
             }
@@ -359,7 +461,6 @@ impl HoneyBadgerBft {
         // If an ABA decides 'false', we don't need the batch from that proposer.
         if all_abas_decided {
             let mut final_epoch_output = EpochOutput::new();
-            let mut app_decisions = Vec::new();
 
             let epoch_rbc_out = self.rbc_outputs.entry(epoch_num).or_default();
             let epoch_aba_out = self.aba_outputs.get(&epoch_num).unwrap(); // Safe due to check above
@@ -368,7 +469,7 @@ impl HoneyBadgerBft {
                 if let Some(true) = epoch_aba_out.get(node_id) {
                     if let Some(batch) = epoch_rbc_out.get(node_id) {
                         final_epoch_output.insert(*node_id, batch.clone());
-                        app_decisions.push(DecidedBatch {
+                        output.newly_decided_batches.push(DecidedBatch {
                             batch: batch.clone(),
                             proposer_id: *node_id,
                             epoch: epoch_num,
@@ -381,9 +482,8 @@ impl HoneyBadgerBft {
                         // handling. DbgPrint!("[HBBFT Epoch {}] Error: ABA
                         // for {} output true, but no RBC batch found!", epoch_num, node_id);
                         return Err(HbbftError::InternalError(format!(
-                            "Epoch {}: ABA for {} output true, but corresponding RBC batch \
-                             missing.",
-                            epoch_num, node_id
+                            "Epoch {epoch_num}: ABA for {node_id} output true, but corresponding \
+                             RBC batch missing."
                         )));
                     }
                 }
@@ -391,18 +491,27 @@ impl HoneyBadgerBft {
             self.decided_epoch_outputs
                 .insert(epoch_num, final_epoch_output);
             // DbgPrint!("[HBBFT Epoch {}] FINALIZED with {} batches.", epoch_num,
-            // app_decisions.len());
+            // output.newly_decided_batches.len());
 
             // Advance to the next epoch if this was the current one being processed.
             if epoch_num == self.current_epoch {
                 self.current_epoch += 1;
                 // DbgPrint!("[HBBFT] Advanced to epoch {}", self.current_epoch);
-                // TODO: Here, you might trigger `propose_batch` for self.current_epoch if there are
-                // pending transactions.
+
+                // Automatically propose for the new current epoch
+                // prepare_and_propose_current_epoch returns HbbftProcessOutput.
+                // Its newly_decided_batches field will be empty, which is correct.
+                let next_epoch_proposal_output = self.prepare_and_propose_current_epoch()?;
+                output
+                    .messages_to_send
+                    .extend(next_epoch_proposal_output.messages_to_send);
+                output
+                    .timer_requests_to_set
+                    .extend(next_epoch_proposal_output.timer_requests_to_set);
             }
-            return Ok(Some(app_decisions));
+            return Ok(output);
         }
-        Ok(None)
+        Ok(output) // Not ready to finalize or already finalized, return empty output
     }
 
     /// Retrieves all finalized batches for a given epoch.
@@ -426,10 +535,15 @@ impl HoneyBadgerBft {
             // HBBFT requires all nodes to propose something for ACS.
             // DbgPrint!("[HBBFT Epoch {}] No transactions, proposing empty batch for self (node
             // {})", self.current_epoch, self.own_id);
+            // Fall through to propose_batch
         } else {
             // DbgPrint!("[HBBFT Epoch {}] Proposing batch with {} transactions for self (node {})",
             // self.current_epoch, txs_to_propose.len(), self.own_id);
+            // Fall through to propose_batch
         }
-        self.propose_batch(txs_to_propose, self.current_epoch)
+        // `propose_batch` already calls `ensure_epoch_active_and_get_timers`
+        // indirectly via its own call to `ensure_epoch_instances` which we've now wrapped.
+        // The `propose_batch` method itself will now correctly generate initial RBC timer requests.
+        self.propose_batch(txs_to_propose, self.current_epoch) // This will internally handle timer requests for the new epoch
     }
 }
