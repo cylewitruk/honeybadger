@@ -5,28 +5,70 @@ use std::sync::Arc;
 
 use crate::config::HoneyBadgerConfig;
 use crate::types::{
-    AbaMessage, AbaMessageContent, AbaProcessOutput, AbaRound, EpochNum, HbbftError, NodeId,
-    TimerRequest,
+    AbaMessage, AbaMessageContent, AbaProcessOutput, AbaRound, CoinShare, EpochNum, HbbftError,
+    NodeId, TimerRequest,
 };
 
 // Placeholder for a common coin implementation.
 // In a real system, this would involve threshold signatures.
 pub trait CommonCoin: std::fmt::Debug {
-    fn get_coin(&self, epoch: EpochNum, round: AbaRound) -> bool; // Simplified: returns a pre-determined or random bit
+    /// Called by ABA when it needs a coin for a specific epoch and round,
+    /// typically when a round cannot decide based on EST/AUX messages alone.
+    ///
+    /// This method should:
+    /// 1. Return the node's own share to be broadcast (if applicable for the scheme).
+    /// 2. Indicate if the coin can be determined *now* based on internal state or this call.
+    ///
+    /// It does NOT block.
+    fn request_coin_value(
+        &mut self,
+        epoch: EpochNum,
+        round: AbaRound,
+    ) -> (Option<CoinShare>, Option<bool>); // (Option<own_share_to_broadcast>, Option<coin_value_if_known_now>)
+
+    /// Called by ABA to pass a received coin share message.
+    /// Returns the coin value if this share (and others previously received) completes the coin.
+    fn submit_coin_share(
+        &mut self,
+        epoch: EpochNum,
+        round: AbaRound,
+        share_content: CoinShare,
+        sender_id: NodeId, // ID of the node that sent this share
+    ) -> Option<bool>; // Option<coin_value_if_decided_now>
+
+    /// Called when an ABA round has timed out and a coin value is mandatorily needed
+    /// to proceed to the next round. This method *must* return a boolean.
+    fn get_coin_for_round_fallback(&mut self, epoch: EpochNum, round: AbaRound) -> bool;
 }
 
-// A dummy common coin for now.
-#[derive(Debug)] // Add this
-pub struct DummyCommonCoin {
-    // Make it predictable for testing: round number determines coin.
-}
+#[derive(Debug)]
+pub struct DummyCommonCoin;
+
 impl CommonCoin for DummyCommonCoin {
-    fn get_coin(&self, _epoch: EpochNum, round: AbaRound) -> bool {
-        round % 2 == 0 // Heads for even rounds, tails for odd rounds
+    fn request_coin_value(
+        &mut self,
+        _epoch: EpochNum,
+        round: AbaRound,
+    ) -> (Option<CoinShare>, Option<bool>) {
+        (None, Some(round % 2 == 0)) // No shares to send, coin is immediately known
+    }
+
+    fn submit_coin_share(
+        &mut self,
+        _epoch: EpochNum,
+        _round: AbaRound,
+        _share_content: CoinShare,
+        _sender_id: NodeId,
+    ) -> Option<bool> {
+        None // Dummy coin doesn't process shares
+    }
+
+    fn get_coin_for_round_fallback(&mut self, _epoch: EpochNum, round: AbaRound) -> bool {
+        round % 2 == 0 // Fallback is the same predictable logic
     }
 }
 
-// #[derive(Debug)] // Temporarily remove derive to implement manually
+#[derive(Debug)]
 pub struct BinaryByzantineAgreement {
     config: Arc<HoneyBadgerConfig>,
     batch_proposer_id: NodeId, // The proposer of the batch this ABA is about
@@ -48,28 +90,8 @@ pub struct BinaryByzantineAgreement {
 
     decided_value: Option<bool>,
     decided_round: Option<AbaRound>,
-}
-
-impl std::fmt::Debug for BinaryByzantineAgreement {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BinaryByzantineAgreement")
-            .field("config", &self.config)
-            .field("batch_proposer_id", &self.batch_proposer_id)
-            .field("epoch", &self.epoch)
-            .field("own_id", &self.own_id)
-            // The crucial line: if dyn CommonCoin is truly Debug, this will work.
-            // If it fails here, the problem is fundamental.
-            .field("coin", &self.coin)
-            .field("current_round", &self.current_round)
-            .field("current_estimate", &self.current_estimate)
-            .field("est_values", &self.est_values)
-            .field("aux_values", &self.aux_values)
-            .field("sent_est", &self.sent_est)
-            .field("sent_aux", &self.sent_aux)
-            .field("decided_value", &self.decided_value)
-            .field("decided_round", &self.decided_round)
-            .finish()
-    }
+    // Indicates the round for which we are currently waiting for enough coin shares.
+    waiting_for_coin_in_round: Option<AbaRound>,
 }
 
 impl BinaryByzantineAgreement {
@@ -94,6 +116,7 @@ impl BinaryByzantineAgreement {
             sent_aux: HashMap::new(),
             decided_value: None,
             decided_round: None,
+            waiting_for_coin_in_round: None,
         }
     }
 
@@ -186,9 +209,27 @@ impl BinaryByzantineAgreement {
                     // No immediate response or timer change from a future message
                 }
             }
-            AbaMessageContent::Coin { .. } => { // Removed Conf handling
-                // Handle coin shares if using a threshold coin.
-                // For DummyCommonCoin, this is not directly used in message handling for now.
+            AbaMessageContent::Coin { share, round } => {
+                if Some(*round) == self.waiting_for_coin_in_round && !self.is_decided() {
+                    // DbgPrint!("[ABA ({},{},R{})] Received CoinShare for waiting round {} from
+                    // {}", self.batch_proposer_id, self.epoch, self.current_round,
+                    // round, sender_id);
+                    if let Some(coin_value) = self.coin.submit_coin_share(
+                        self.epoch,
+                        *round,
+                        share.clone(), // CoinShare is Vec<u8>, cheap to clone
+                        sender_id,
+                    ) {
+                        // DbgPrint!("[ABA ({},{},R{})] Coin decided via share: {}. Starting next
+                        // round.", self.batch_proposer_id, self.epoch,
+                        // self.current_round, coin_value);
+                        self.waiting_for_coin_in_round = None;
+                        return self.start_next_round(Some(coin_value)); // Return directly
+                    }
+                    // Else, still waiting for more shares for this round.
+                    // No new messages or timer changes from just one share unless it completes the
+                    // coin.
+                }
             }
         }
 
@@ -240,8 +281,9 @@ impl BinaryByzantineAgreement {
         &mut self,
         round: AbaRound,
     ) -> Result<AbaProcessOutput, HbbftError> {
+        let mut output = AbaProcessOutput::default();
         if self.is_decided() {
-            return Ok(AbaProcessOutput::default());
+            return Ok(output); // Return the default, empty output
         }
 
         if let Some(auxs_for_round) = self.aux_values.get(&round) {
@@ -273,9 +315,30 @@ impl BinaryByzantineAgreement {
                     // A common condition is: if any value v has F+1 AUX messages,
                     // and we haven't decided, we should eventually consult the coin for this round.
                     // For simplicity here, if N-F AUX for multiple values, use coin.
-                    let coin_val = self.coin.get_coin(self.epoch, round);
-                    // DbgPrint!("[ABA ({},{},R{})] CONF set {:?}, coin for round {} is {}. Starting next round.", self.batch_proposer_id, self.epoch, round, current_conf_values, round, coin_val);
-                    return self.start_next_round(Some(coin_val)); // Return directly as start_next_round creates full output
+                    // DbgPrint!("[ABA ({},{},R{})] CONF set {:?}, requesting coin for round {}",
+                    // self.batch_proposer_id, self.epoch, round, current_conf_values, round);
+
+                    let (own_share_opt, coin_now_opt) =
+                        self.coin.request_coin_value(self.epoch, round);
+
+                    if let Some(share_to_send) = own_share_opt {
+                        output.messages_to_send.push(AbaMessage {
+                            pub_batch_proposer_id: self.batch_proposer_id,
+                            pub_epoch: self.epoch,
+                            pub_content: AbaMessageContent::Coin { share: share_to_send, round },
+                            pub_sender_id: self.own_id,
+                        });
+                    }
+
+                    if let Some(coin_value) = coin_now_opt {
+                        // DbgPrint!("[ABA ({},{},R{})] Coin immediately available: {}. Starting
+                        // next round.", self.batch_proposer_id, self.epoch, round, coin_value);
+                        return self.start_next_round(Some(coin_value));
+                    } else {
+                        self.waiting_for_coin_in_round = Some(round);
+                        // Timer for current round `round` should already be running.
+                        // We are now waiting for Coin messages or timeout for this round.
+                    }
                 }
             } else {
                 // No value has N-F AUX messages yet. Wait for more, or if round seems stuck,
@@ -284,7 +347,7 @@ impl BinaryByzantineAgreement {
                 // 1`. This is step 1.3 in your ROADMAP.md.
             }
         }
-        Ok(AbaProcessOutput::default())
+        Ok(output) // Return the (potentially modified) output
     }
 
     /// Handles a timeout for a specific ABA round.
@@ -301,7 +364,10 @@ impl BinaryByzantineAgreement {
 
         // DbgPrint!("[ABA ({},{},R{})] Round {} TIMED OUT. Consulting coin.",
         // self.batch_proposer_id, self.epoch, self.current_round, round_that_timed_out);
-        let coin_val = self.coin.get_coin(self.epoch, self.current_round);
+        let coin_val = self
+            .coin
+            .get_coin_for_round_fallback(self.epoch, self.current_round);
+        self.waiting_for_coin_in_round = None; // No longer waiting for this timed-out round's coin
         self.start_next_round(Some(coin_val))
     }
 
@@ -313,6 +379,7 @@ impl BinaryByzantineAgreement {
             return Ok(AbaProcessOutput::default());
         }
 
+        self.waiting_for_coin_in_round = None; // Starting a new round, so not waiting for previous one.
         self.current_round += 1;
 
         // The estimate for the new round comes from the coin flip of the *previous* round (round r
