@@ -119,6 +119,7 @@ impl BinaryByzantineAgreement {
             epoch: self.epoch,
             batch_proposer_id: self.batch_proposer_id,
             round: 0,
+            suggested_duration_ms: self.config.default_aba_round_timeout_ms,
         };
         Ok(AbaProcessOutput {
             messages_to_send: vec![est_message],
@@ -345,6 +346,7 @@ impl BinaryByzantineAgreement {
             epoch: self.epoch,
             batch_proposer_id: self.batch_proposer_id,
             round: self.current_round,
+            suggested_duration_ms: self.config.default_aba_round_timeout_ms,
         };
 
         let mut messages_to_send = vec![est_message];

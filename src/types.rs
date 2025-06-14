@@ -101,12 +101,12 @@ pub enum TimerRequest {
         // Identifies which ABA instance this timer is for within the HBBFT context
         batch_proposer_id: NodeId,
         round: AbaRound,
-        // Note: The actual duration of the timeout will be determined by the
-        // consuming application based on its configuration or heuristics.
+        suggested_duration_ms: u64,
     },
     SetRbcTimeout {
         epoch: EpochNum,
         proposer_id: NodeId, // The proposer of the RBC instance
+        suggested_duration_ms: u64,
     },
 }
 

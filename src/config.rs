@@ -19,6 +19,8 @@ pub struct HoneyBadgerConfig {
                                          * - Max batch size, etc. */
     // Number of recent finalized epochs for which to retain detailed protocol state.
     pub epochs_to_retain_state: EpochNum,
+    pub default_aba_round_timeout_ms: u64,
+    pub default_rbc_instance_timeout_ms: u64,
 }
 
 impl HoneyBadgerConfig {
@@ -27,6 +29,8 @@ impl HoneyBadgerConfig {
         all_node_ids: BTreeSet<NodeId>,
         num_faulty_nodes: usize,
         epochs_to_retain_state: EpochNum, // New parameter
+        default_aba_round_timeout_ms: u64,
+        default_rbc_instance_timeout_ms: u64,
     ) -> Result<Self, String> {
         let num_total_nodes = all_node_ids.len();
         if num_total_nodes == 0 {
@@ -49,6 +53,12 @@ impl HoneyBadgerConfig {
             // Require at least 1 to avoid ambiguity or overly aggressive pruning.
             return Err("epochs_to_retain_state must be at least 1.".to_string());
         }
+        if default_aba_round_timeout_ms == 0 {
+            return Err("default_aba_round_timeout_ms must be greater than 0.".to_string());
+        }
+        if default_rbc_instance_timeout_ms == 0 {
+            return Err("default_rbc_instance_timeout_ms must be greater than 0.".to_string());
+        }
 
         Ok(HoneyBadgerConfig {
             own_id,
@@ -56,6 +66,8 @@ impl HoneyBadgerConfig {
             num_total_nodes,
             num_faulty_nodes,
             epochs_to_retain_state,
+            default_aba_round_timeout_ms,
+            default_rbc_instance_timeout_ms,
         })
     }
 

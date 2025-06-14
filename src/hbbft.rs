@@ -390,8 +390,11 @@ impl HoneyBadgerBft {
                 // simply don't have the output. The application layer should make
                 // timer setting idempotent. DbgPrint!("[HBBFT Epoch {}] Requesting
                 // RBC Timeout for proposer {}", epoch_num, proposer_id);
-                rbc_timer_requests
-                    .push(TimerRequest::SetRbcTimeout { epoch: epoch_num, proposer_id });
+                rbc_timer_requests.push(TimerRequest::SetRbcTimeout {
+                    epoch: epoch_num,
+                    proposer_id,
+                    suggested_duration_ms: self.config.default_rbc_instance_timeout_ms,
+                });
             }
         }
 
