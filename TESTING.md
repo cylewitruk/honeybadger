@@ -125,31 +125,31 @@ This document outlines the testing plan for the `honeybadger` crate, focusing on
 
 ### Scenarios
 
-- [ ] **Happy Path (All Honest Nodes):**
+- [x] **Happy Path (All Honest Nodes):**
   - [x] Single proposer epoch: all nodes decide on the proposed batch.
   - [x] All N nodes propose: all nodes decide on the same set of N batches.
-  - [ ] Multiple epochs: correct epoch advancement and decisions over several epochs.
-  - [ ] Transaction flow: submitted transactions appear in decided batches.
-- [ ] **RBC Timeout Scenarios:**
-  - [ ] Proposer crashes/`VAL` lost: other nodes generate `SetRbcTimeout` requests.
-  - [ ] Simulate RBC timer expiry: `handle_timer_expiry` leads to `initiate_aba_for_rbc(false)`.
-  - [ ] Epoch finalizes, excluding batch from faulty/silent proposer.
-- [ ] **ABA Round Timeout Scenarios:**
-  - [ ] Simulate message loss causing ABA round stall: `SetAbaRoundTimeout` requests generated.
-  - [ ] Simulate ABA timer expiry: `handle_timer_expiry` calls `aba_instance.handle_round_timeout`.
-  - [ ] ABA progresses using `DummyCommonCoin` and eventually decides.
-- [ ] **Automated Epoch Advancement:**
-  - [ ] Upon epoch finalization, messages and timer requests for the *next* epoch are automatically generated.
-- [ ] **State Pruning:**
-  - [ ] Run for `M > config.epochs_to_retain_state` epochs.
-  - [ ] Verify (e.g., by inspecting map sizes if possible, or inferring) that internal state maps (`rbc_instances`, `aba_instances`, etc.) are pruned.
-- [ ] **Basic Fault Tolerance (Simulated Crash Faults):**
-  - [ ] Up to `F` nodes stop participating.
-  - [ ] Verify remaining correct nodes can still make progress and finalize epochs.
-- [ ] **RBC Proposer Equivocation (Basic):**
-  - [ ] Proposer sends different `VAL` messages.
-  - [ ] Verify `ReliableBroadcast` instances handle this by sticking to the first valid `VAL`.
-  - [ ] Verify HBBFT still agrees on a set of batches (equivocating proposer's batch might be excluded).
+  - [x] Multiple epochs: correct epoch advancement and decisions over several epochs.
+  - [x] Transaction flow: submitted transactions appear in decided batches.
+- [x] **RBC Timeout Scenarios:**
+  - [x] Proposer crashes/`VAL` lost: other nodes generate `SetRbcTimeout` requests.
+  - [x] Simulate RBC timer expiry: `handle_timer_expiry` leads to `initiate_aba_for_rbc(false)`.
+  - [x] Epoch finalizes, excluding batch from faulty/silent proposer.
+- [x] **ABA Round Timeout Scenarios:**
+  - [x] Simulate message loss causing ABA round stall: `SetAbaRoundTimeout` requests generated.
+  - [x] Simulate ABA timer expiry: `handle_timer_expiry` calls `aba_instance.handle_round_timeout`.
+  - [x] ABA progresses using `DummyCommonCoin` and eventually decides.
+- [x] **Automated Epoch Advancement:**
+  - [x] Upon epoch finalization, messages and timer requests for the *next* epoch are automatically generated.
+- [x] **State Pruning:**
+  - [x] Run for `M > config.epochs_to_retain_state` epochs.
+  - [x] Verify (e.g., by inspecting map sizes if possible, or inferring) that internal state maps (`rbc_instances`, `aba_instances`, etc.) are pruned.
+- [x] **Basic Fault Tolerance (Simulated Crash Faults):**
+  - [x] Up to `F` nodes stop participating.
+  - [x] Verify remaining correct nodes can still make progress and finalize epochs.
+- [x] **RBC Proposer Equivocation (Basic):**
+  - [x] Proposer sends different `VAL` messages.
+  - [x] Verify `ReliableBroadcast` instances handle this by sticking to the first valid `VAL`.
+  - [x] Verify HBBFT still agrees on a set of batches (equivocating proposer's batch might be excluded).
 
 ## III. Limitations of Testing Within This Crate
 
