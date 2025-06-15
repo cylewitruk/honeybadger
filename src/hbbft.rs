@@ -95,12 +95,10 @@ impl HoneyBadgerBft {
 
         // Initialize RBC and ABA instances for this epoch if not already present
         // and get timer requests for other proposers' RBCs.
-        let mut hbbft_output = HbbftProcessOutput::default();
+        let mut hbbft_output = HbbftProcessOutput::default(); // Initialize once
         if let Some(timer_reqs) = self.ensure_epoch_active_and_get_timers(epoch_num) {
             hbbft_output.timer_requests_to_set.extend(timer_reqs);
         }
-
-        let mut hbbft_output = HbbftProcessOutput::default();
 
         // Initiate our own RBC instance for this epoch
         if let Some(proposer_rbc_map) = self.rbc_instances.get_mut(&epoch_num) {
@@ -144,12 +142,10 @@ impl HoneyBadgerBft {
         }
 
         // Initialize instances for the message's epoch if it's new to us and not too old.
-        let mut hbbft_output = HbbftProcessOutput::default();
+        let mut hbbft_output = HbbftProcessOutput::default(); // Initialize once
         if let Some(timer_reqs) = self.ensure_epoch_active_and_get_timers(message_epoch) {
             hbbft_output.timer_requests_to_set.extend(timer_reqs);
         }
-
-        let mut hbbft_output = HbbftProcessOutput::default();
 
         match message {
             HoneyBadgerMessage::Rbc(rbc_msg) => {
