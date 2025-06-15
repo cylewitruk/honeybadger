@@ -228,7 +228,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::dummy::DummyCommonCoin;
+    use crate::testing::DummyCommonCoin;
     use crate::types::NodeId;
 
     fn create_node_ids(n: usize) -> BTreeSet<NodeId> {

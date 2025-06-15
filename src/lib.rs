@@ -5,11 +5,8 @@ mod hbbft;
 mod rbc;
 mod types;
 
-#[cfg(any(test, feature = "dummy"))]
-pub mod dummy;
-
-#[cfg(test)]
-mod testing;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 // Core state machine and configuration
 pub use config::{CoinFactory, HoneyBadgerConfig, HoneyBadgerConfigBuilder};

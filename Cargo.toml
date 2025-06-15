@@ -5,7 +5,10 @@ edition = "2024"
 
 [features]
 default = []
-dummy = []
+testing = []
 
 [dependencies]
 sha2 = { version = "0.10.9", default-features = false }
+
+[dev-dependencies]
+honeybadger = { path = ".", features = ["testing"] }

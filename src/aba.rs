@@ -620,8 +620,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::dummy::DummyCommonCoin;
-    use crate::testing::create_test_config;
+    use crate::testing::{DummyCommonCoin, create_test_config};
 
     const BATCH_PROPOSER_ID: NodeId = 0;
     const EPOCH_NUM: EpochNum = 1;
@@ -646,7 +645,7 @@ mod tests {
         assert_eq!(msg.pub_epoch, EPOCH_NUM);
         assert_eq!(msg.pub_sender_id, 0);
         if let AbaMessageContent::Est { value, round } = msg.pub_content {
-            assert_eq!(value, true);
+            assert!(value);
             assert_eq!(round, 0);
         } else {
             panic!("Expected EST message");
@@ -683,7 +682,7 @@ mod tests {
         assert_eq!(output.messages_to_send.len(), 1);
         let msg = &output.messages_to_send[0];
         if let AbaMessageContent::Aux { value, round } = msg.pub_content {
-            assert_eq!(value, true);
+            assert!(value);
             assert_eq!(round, 0);
         } else {
             panic!("Expected AUX message");
@@ -781,7 +780,7 @@ mod tests {
         assert_eq!(aba_node0.current_estimate, Some(true));
         assert_eq!(output.messages_to_send.len(), 1); // EST for round 1
         if let AbaMessageContent::Est { value, round } = output.messages_to_send[0].pub_content {
-            assert_eq!(value, true);
+            assert!(value);
             assert_eq!(round, 1);
         } else {
             panic!("Expected EST for round 1");
@@ -857,7 +856,7 @@ mod tests {
         assert_eq!(aba.current_estimate, Some(true));
         assert_eq!(output.messages_to_send.len(), 1); // EST for round 1
         if let AbaMessageContent::Est { value, round } = output.messages_to_send[0].pub_content {
-            assert_eq!(value, true);
+            assert!(value);
             assert_eq!(round, 1);
         }
         assert!(output.timer_request_to_set.is_some());

@@ -60,6 +60,7 @@ dependencies = [
 name = "honeybadger"
 version = "0.1.0"
 dependencies = [
+ "honeybadger",
  "sha2",
 ]
 

@@ -7,7 +7,7 @@
 test *args="":
     #!/usr/bin/env bash
     set -e
-    LOG_FEATURE=""
+    FEATURES="testing"
     LOG_LEVEL="debug"
     TEST_NAME=""
     RUN_IGNORED=""
@@ -47,10 +47,11 @@ test *args="":
     RUST_LOG=${LOG_LEVEL} PROPTEST_CASES=25 cargo nextest --color always run --no-fail-fast \
         $([[ -n "$TEST_NAME" ]] && echo "--nocapture" || echo "") \
         ${RUN_IGNORED} \
+        --features "${FEATURES}" \
         $([[ -n "$TEST_NAME" ]] && echo "--filterset test(${TEST_NAME})" || echo "")
 
 lint:
-    cargo +nightly clippy --lib -- -D warnings
+    cargo +nightly clippy --lib --tests -- -D warnings
     cargo +nightly fmt --all -- --check
 
 fmt:
