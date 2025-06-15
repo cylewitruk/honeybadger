@@ -1,9 +1,9 @@
 // This content is intended for tests/integration.rs
 
 use std::collections::HashSet;
-use honeybadger::TimerExpiry;
+
 use honeybadger::testing::{DEFAULT_EPOCH, TestHarness};
-use honeybadger::{Batch, EpochNum, NodeId, Transaction}; // Added Batch and Transaction // For comparing sets of decided batches
+use honeybadger::{Batch, EpochNum, NodeId, TimerExpiry, Transaction}; // Added Batch and Transaction // For comparing sets of decided batches
 
 #[test]
 fn happy_path_single_proposer_epoch() {
@@ -232,7 +232,10 @@ fn rbc_timeout_proposer_silent() {
     let mut rbc_timeout_found_for_silent_proposer = false;
     for (_expiry_instant, timer_expiries) in harness.timers.iter() {
         for timer_expiry in timer_expiries {
-            if let TimerExpiry::RbcTimeout { epoch, proposer_id: timer_proposer_id } = timer_expiry
+            if let TimerExpiry::RbcTimeout {
+                epoch,
+                proposer_id: timer_proposer_id,
+            } = timer_expiry
             {
                 if *epoch == epoch_to_test && *timer_proposer_id == silent_proposer_id {
                     rbc_timeout_found_for_silent_proposer = true;
@@ -256,7 +259,10 @@ fn rbc_timeout_proposer_silent() {
         if harness.all_nodes_decided_epoch(epoch_to_test) {
             let mut all_have_correct_num_batches = true;
             for node_id_check in &node_ids {
-                if let Some(epochs_data) = harness.finalized_outputs.get(node_id_check) {
+                if let Some(epochs_data) = harness
+                    .finalized_outputs
+                    .get(node_id_check)
+                {
                     if let Some(batches) = epochs_data.get(&epoch_to_test) {
                         if batches.len() != num_nodes - 1 {
                             all_have_correct_num_batches = false;
@@ -346,39 +352,76 @@ fn aba_round_timeout_and_recovery() {
         .expect("Propose failed");
 
     // Phase 1: Let RBC deliver and ABA start (timer for round 0 set)
-    let mut aba_r0_timer_is_set = false;
-    for i in 0..200 {
+    // We need to ensure RBC for proposer_id has delivered on all nodes before
+    // clearing the queue. We'll run for a fixed number of steps that should be
+    // sufficient for N=4 RBC, and also check that the ABA timer gets set as an
+    // indicator of progress.
+    println!("ABA Timeout Test: Starting Phase 1.");
+    let mut aba_r0_timer_is_set_in_harness = false;
+    const SUFFICIENT_STEPS_FOR_RBC_AND_ABA_START: usize = 100; // Increased from typical few steps
+
+    for _ in 0..SUFFICIENT_STEPS_FOR_RBC_AND_ABA_START {
         harness.step();
+        // Check if the timer is set after each step, but continue for fixed steps
+        // to give all nodes a chance for their RBC to complete.
+        if !aba_r0_timer_is_set_in_harness {
+            // Only check if not already found
+            for timer_expiries in harness.timers.values() {
+                for timer_expiry in timer_expiries {
+                    if let TimerExpiry::AbaRoundTimeout {
+                        epoch,
+                        batch_proposer_id: bp_id,
+                        round,
+                    } = timer_expiry
+                    {
+                        if *epoch == epoch_to_test && *bp_id == proposer_id && *round == 0 {
+                            aba_r0_timer_is_set_in_harness = true;
+                            break;
+                        }
+                    }
+                }
+                if aba_r0_timer_is_set_in_harness {
+                    break;
+                }
+            }
+        }
+    }
+
+    // After sufficient steps, assert the timer is now set in the harness.
+    // This implies at least one node (and by now, likely all) has started ABA for
+    // proposer_id. The key is that SUFFICIENT_STEPS_FOR_RBC_AND_ABA_START
+    // should have allowed RBC to deliver on all nodes.
+    if !aba_r0_timer_is_set_in_harness {
+        // Final check if not found during loop
         for timer_expiries in harness.timers.values() {
             for timer_expiry in timer_expiries {
-                if let TimerExpiry::AbaRoundTimeout { epoch, batch_proposer_id: bp_id, round } =
-                    timer_expiry
+                if let TimerExpiry::AbaRoundTimeout {
+                    epoch,
+                    batch_proposer_id: bp_id,
+                    round,
+                } = timer_expiry
                 {
                     if *epoch == epoch_to_test && *bp_id == proposer_id && *round == 0 {
-                        aba_r0_timer_is_set = true;
+                        aba_r0_timer_is_set_in_harness = true;
                         break;
                     }
                 }
             }
-            if aba_r0_timer_is_set {
+            if aba_r0_timer_is_set_in_harness {
                 break;
             }
         }
-        if aba_r0_timer_is_set {
-            println!(
-                "ABA Timeout Test: Phase 1 condition met at step {i}. ABA round 0 timer for \
-                 proposer {proposer_id} is set."
-            );
-            break;
-        }
-        if i == 199 {
-            panic!(
-                "ABA Timeout Test: Max steps reached in phase 1. ABA round 0 timer for proposer \
-                 {proposer_id} was not set."
-            );
-        }
     }
-    assert!(aba_r0_timer_is_set, "ABA round 0 timer was not set.");
+    assert!(
+        aba_r0_timer_is_set_in_harness,
+        "ABA R0 timer for proposer {proposer_id} was not set after \
+         {SUFFICIENT_STEPS_FOR_RBC_AND_ABA_START} steps. RBC might not have completed on all \
+         nodes."
+    );
+    println!(
+        "ABA Timeout Test: Phase 1 completed. Assumed RBC for proposer {proposer_id} delivered on \
+         all nodes and its ABA R0 timer is set in harness."
+    );
 
     // Phase 2: Induce timeout for round 0 by clearing the message queue.
     // This ensures that the ABA round 0 timer will expire because EST/AUX messages
@@ -392,7 +435,9 @@ fn aba_round_timeout_and_recovery() {
         if harness.all_nodes_decided_epoch(epoch_to_test) {
             // Once all nodes have decided the epoch, we can break.
             // The assertions outside the loop will verify the content.
-            println!("ABA Timeout Test: All nodes decided epoch {epoch_to_test} at step {i} of phase 3.");
+            println!(
+                "ABA Timeout Test: All nodes decided epoch {epoch_to_test} at step {i} of phase 3."
+            );
             break;
         }
         if !harness.step() && harness.network_queue.is_empty() && harness.timers.is_empty() {
@@ -405,7 +450,12 @@ fn aba_round_timeout_and_recovery() {
 
     assert!(harness.all_nodes_decided_epoch(epoch_to_test));
     for node_id_check in &node_ids {
-        let node_output = harness.finalized_outputs.get(node_id_check).unwrap().get(&epoch_to_test).unwrap();
+        let node_output = harness
+            .finalized_outputs
+            .get(node_id_check)
+            .unwrap()
+            .get(&epoch_to_test)
+            .unwrap();
         assert_eq!(node_output.len(), 1);
         assert_eq!(node_output[0].proposer_id, proposer_id);
         assert_eq!(node_output[0].batch, expected_batch);

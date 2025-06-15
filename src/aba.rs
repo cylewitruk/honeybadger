@@ -386,55 +386,18 @@ impl BinaryByzantineAgreement {
                 }
             } else {
                 // current_conf_values is empty (no value has N-F AUX support)
+                // We simply wait for more AUX messages for the current round or for the round
+                // to time out. The timeout mechanism will consult the coin. F+1
+                // AUX support alone is not sufficient to consult the coin
+                // prematurely if a decision might still be reached
+                // with more messages in the current round.
                 eprintln!(
-                    "[DEBUG ABA try_decide R{round}] current_conf_values is empty. Checking for \
-                     F+1 AUX."
+                    "[DEBUG ABA try_decide R{round}] current_conf_values is empty. Waiting for \
+                     more AUX or timeout. Has F+1 AUX for any value: {}",
+                    aux_counts
+                        .values()
+                        .any(|&c| c >= self.config.low_threshold())
                 );
-                let mut has_f_plus_one_aux_for_any_value = false;
-                for count in aux_counts.values() {
-                    if *count >= self.config.low_threshold() {
-                        // F+1
-                        has_f_plus_one_aux_for_any_value = true;
-                        break;
-                    }
-                }
-
-                if has_f_plus_one_aux_for_any_value {
-                    eprintln!(
-                        "[DEBUG ABA try_decide R{round}] Found F+1 AUX for some value. Requesting \
-                         coin."
-                    );
-                    let (own_share_opt, coin_now_opt) = self
-                        .coin
-                        .request_coin_value(self.epoch, round);
-
-                    if let Some(share_to_send) = own_share_opt {
-                        output
-                            .messages_to_send
-                            .push(AbaMessage {
-                                pub_batch_proposer_id: self.batch_proposer_id,
-                                pub_epoch: self.epoch,
-                                pub_content: AbaMessageContent::Coin {
-                                    share: share_to_send,
-                                    round,
-                                },
-                                pub_sender_id: self.own_id,
-                            });
-                    }
-
-                    if let Some(coin_value) = coin_now_opt {
-                        eprintln!(
-                            "[DEBUG ABA try_decide R{round}] Coin immediately available via F+1 \
-                             path: {coin_value}. Starting next round."
-                        );
-                        return self.start_next_round(Some(coin_value));
-                    } else {
-                        self.waiting_for_coin_in_round = Some(round);
-                        eprintln!(
-                            "[DEBUG ABA try_decide R{round}] Waiting for coin in round {round}."
-                        );
-                    }
-                }
                 // If no N-F support and no F+1 support for any value, do
                 // nothing, wait for more messages or timeout.
             }
@@ -775,17 +738,19 @@ mod tests {
         let output = aba_node0
             .try_decide_or_advance_round(0)
             .unwrap();
-        // DummyCoin for round 0 is true (0 % 2 == 0). So next round estimate is true.
-        assert_eq!(aba_node0.current_round, 1);
-        assert_eq!(aba_node0.current_estimate, Some(true));
-        assert_eq!(output.messages_to_send.len(), 1); // EST for round 1
-        if let AbaMessageContent::Est { value, round } = output.messages_to_send[0].pub_content {
-            assert!(value);
-            assert_eq!(round, 1);
-        } else {
-            panic!("Expected EST for round 1");
-        }
-        assert!(output.timer_request_to_set.is_some());
+        // With the refactored logic, F+1 AUX support alone (without N-F support)
+        // does not immediately trigger a coin consultation or round advancement.
+        // The system waits for more AUX messages or a timeout for round 0.
+        assert_eq!(aba_node0.current_round, 0, "Round should not advance yet");
+        assert_eq!(aba_node0.current_estimate, Some(true), "Initial estimate should remain");
+        assert!(output.messages_to_send.is_empty(), "No messages should be sent immediately");
+        assert!(output.timer_request_to_set.is_none(), "No new timer should be set by this path");
+        assert!(
+            aba_node0
+                .waiting_for_coin_in_round
+                .is_none(),
+            "Should not be waiting for coin yet via this path"
+        );
     }
 
     #[test]
