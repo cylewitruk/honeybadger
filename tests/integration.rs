@@ -528,6 +528,156 @@ fn fault_tolerance_f_crashed_nodes() {
 }
 
 #[test]
+fn rbc_proposer_equivocation() {
+    let num_nodes = 4;
+    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    // Use DummyCommonCoin for this test to make ABA behavior more predictable,
+    // especially for the equivocator's own ABA instance.
+    let mut harness =
+        TestHarness::new_with_config_modifier(node_ids.clone(), |num_nodes, f, id| {
+            honeybadger::testing::create_dummy_config(num_nodes, f, id)
+        });
+
+    let epoch_to_test: EpochNum = DEFAULT_EPOCH;
+    let equivocating_proposer_id: NodeId = 0;
+
+    println!(
+        "RBC Equivocation Test: Proposer {equivocating_proposer_id} will equivocate in epoch \
+         {epoch_to_test}."
+    );
+
+    // --- Craft equivocating VAL messages from equivocating_proposer_id ---
+    let tx_v1: Transaction = vec![1, 0, 1];
+    let batch_v1 = Batch::new(vec![tx_v1]);
+    let val_message_v1 = honeybadger::HoneyBadgerMessage::Rbc(honeybadger::RbcMessage {
+        pub_proposer_id: equivocating_proposer_id,
+        pub_epoch: epoch_to_test,
+        pub_content: honeybadger::RbcMessageContent::Val(batch_v1.clone()),
+        pub_sender_id: equivocating_proposer_id,
+    });
+
+    let tx_v2: Transaction = vec![2, 0, 2];
+    let batch_v2 = Batch::new(vec![tx_v2]);
+    let val_message_v2 = honeybadger::HoneyBadgerMessage::Rbc(honeybadger::RbcMessage {
+        pub_proposer_id: equivocating_proposer_id,
+        pub_epoch: epoch_to_test,
+        pub_content: honeybadger::RbcMessageContent::Val(batch_v2.clone()),
+        pub_sender_id: equivocating_proposer_id,
+    });
+
+    // Inject both VAL messages from the equivocator
+    harness.inject_message(val_message_v1);
+    harness.inject_message(val_message_v2);
+
+    // --- Honest nodes propose their batches ---
+    let mut expected_decided_batches_set = HashSet::new();
+    for &node_id in &node_ids {
+        if node_id == equivocating_proposer_id {
+            // Have the equivocator make a "normal" proposal first (e.g., empty).
+            // This ensures its HBBFT instance initializes RBC/ABA for itself for this
+            // epoch. Its own RBC for (0,0) will time out. Its ABA for (0,0)
+            // will start false.
+            harness
+                .propose_on_node(node_id, epoch_to_test, vec![]) // Propose empty batch
+                .expect("Propose for equivocator failed");
+        } else {
+            // Honest proposers
+            let tx_content: u8 = node_id as u8 + 50;
+            let tx_honest: Transaction = vec![tx_content];
+            let batch_honest = Batch::new(vec![tx_honest.clone()]);
+            expected_decided_batches_set.insert((node_id, batch_honest.clone()));
+            harness
+                .propose_on_node(node_id, epoch_to_test, vec![tx_honest])
+                .unwrap_or_else(|e| panic!("Propose failed for honest node {node_id}: {e:?}"));
+        }
+    }
+
+    // For honest nodes, they will decide on batch_v1 from the equivocator.
+    let mut expected_decided_batches_set_for_honest_nodes = expected_decided_batches_set.clone();
+    expected_decided_batches_set_for_honest_nodes
+        .insert((equivocating_proposer_id, batch_v1.clone()));
+
+    // For the equivocator node, its own RBC for its proposal will time out,
+    // so it will exclude its own batch, even if its ABA for itself decides true.
+    // So, expected_decided_batches_set (without equivocator's batch_v1) is correct
+    // for node 0.
+
+    // --- Run simulation ---
+    let max_steps = 1500; // Equivocation might cause more timeouts
+    for i in 0..max_steps {
+        // Wait until all nodes have decided the epoch. The number of batches might
+        // differ.
+        if harness.all_nodes_decided_epoch(epoch_to_test) {
+            break;
+        }
+        if !harness.step() && harness.network_queue.is_empty() && harness.timers.is_empty() {
+            panic!("RBC Equivocation Test: Simulation stalled at step {i}");
+        }
+        if i == max_steps - 1 {
+            panic!("RBC Equivocation Test: Max simulation steps reached");
+        }
+    }
+
+    // --- Assertions ---
+    assert!(
+        harness.all_nodes_decided_epoch(epoch_to_test),
+        "RBC Equivocation Test: Not all nodes decided on epoch {epoch_to_test}"
+    );
+
+    for &node_id_check in &node_ids {
+        let node_output_for_epoch = harness
+            .finalized_outputs
+            .get(&node_id_check)
+            .unwrap()
+            .get(&epoch_to_test)
+            .unwrap();
+        let decided_set_for_node: HashSet<(NodeId, Batch)> = node_output_for_epoch
+            .iter()
+            .map(|db| (db.proposer_id, db.batch.clone()))
+            .collect();
+
+        if node_id_check == equivocating_proposer_id {
+            // Equivocator excludes its own batch due to its RBC timeout for its "empty"
+            // proposal even if its ABA for itself decided true.
+            assert_eq!(
+                node_output_for_epoch.len(),
+                num_nodes - 1,
+                "Equivocating Node {node_id_check} decided on {count} batches, expected \
+                 {expected_count}",
+                count = node_output_for_epoch.len(),
+                expected_count = num_nodes - 1
+            );
+            assert_eq!(
+                decided_set_for_node, expected_decided_batches_set,
+                "Equivocating Node {node_id_check} has incorrect set of decided batches"
+            );
+        } else {
+            // Honest nodes include batch_v1 from the equivocator
+            assert_eq!(
+                node_output_for_epoch.len(),
+                num_nodes,
+                "Honest Node {node_id_check} decided on {count} batches, expected {expected_count}",
+                count = node_output_for_epoch.len(),
+                expected_count = num_nodes
+            );
+            assert_eq!(
+                decided_set_for_node, expected_decided_batches_set_for_honest_nodes,
+                "Honest Node {node_id_check} has incorrect set of decided batches"
+            );
+            assert!(
+                node_output_for_epoch
+                    .iter()
+                    .any(|db| db.proposer_id == equivocating_proposer_id && db.batch == batch_v1)
+            );
+        }
+    }
+    println!(
+        "RBC Equivocation Test: Passed. Honest nodes agreed on one version of equivocator's \
+         batch; equivocator excluded its own."
+    );
+}
+
+#[test]
 fn rbc_timeout_proposer_silent() {
     let num_nodes = 4;
     // let f = (num_nodes - 1) / 3; // f=1

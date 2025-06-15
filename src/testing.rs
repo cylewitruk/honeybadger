@@ -233,6 +233,11 @@ impl TestHarness {
         }
     }
 
+    /// Directly injects a message into the global network queue.
+    pub fn inject_message(&mut self, message: HoneyBadgerMessage) {
+        self.network_queue.push_back(message);
+    }
+
     pub fn submit_tx_to_node(&mut self, node_id: NodeId, tx: Transaction) {
         if self.crashed_nodes.contains(&node_id) {
             return;

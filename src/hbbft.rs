@@ -414,6 +414,11 @@ impl HoneyBadgerBft {
             });
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    pub fn _ensure_epoch_active_and_get_timers(&mut self, epoch_num: EpochNum) {
+        self.ensure_epoch_active_and_get_timers(epoch_num);
+    }
+
     /// Ensures instances for an epoch are created and returns TimerRequests for
     /// RBCs of other proposers if their output is not yet known.
     fn ensure_epoch_active_and_get_timers(
@@ -533,10 +538,16 @@ impl HoneyBadgerBft {
                                 epoch: epoch_num,
                             });
                     } else {
-                        return Err(HbbftError::InternalError(format!(
+                        // ABA decided true, but RBC didn't deliver a batch.
+                        // This indicates an issue with that specific proposer (e.g. equivocation
+                        // where RBC timed out, but ABA coin led to true).
+                        // We should not include this batch and log it, but not fail the entire
+                        // epoch finalization for other valid batches.
+                        eprintln!(
                             "Epoch {epoch_num}: ABA for {node_id} output true, but corresponding \
-                             RBC batch missing."
-                        )));
+                             RBC batch missing. Excluding this batch from epoch output."
+                        );
+                        // Continue to next proposer_id
                     }
                 }
             }
