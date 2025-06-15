@@ -678,6 +678,163 @@ fn rbc_proposer_equivocation() {
 }
 
 #[test]
+fn aba_est_equivocation() {
+    let num_nodes = 4;
+    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    // Use DummyCommonCoin for predictability
+    let mut harness =
+        TestHarness::new_with_config_modifier(node_ids.clone(), |num_nodes, f, id| {
+            honeybadger::testing::create_dummy_config(num_nodes, f, id)
+        });
+
+    let epoch_to_test: EpochNum = DEFAULT_EPOCH;
+    let target_proposer_for_aba: NodeId = 1; // ABA instance will be for this proposer's batch
+    let equivocating_node_id: NodeId = 0; // This node will send conflicting ESTs
+
+    println!(
+        "ABA EST Equivocation Test: Node {equivocating_node_id} will equivocate EST for ABA \
+         related to proposer {target_proposer_for_aba} in epoch {epoch_to_test}."
+    );
+
+    // --- All nodes (including equivocator) initially propose honestly for
+    // target_proposer_for_aba's RBC --- This will lead to ABA(true) for
+    // target_proposer_for_aba on all nodes.
+    let tx_honest_proposer: Transaction = vec![target_proposer_for_aba as u8];
+
+    // Node `target_proposer_for_aba` proposes its batch
+    harness
+        .propose_on_node(target_proposer_for_aba, epoch_to_test, vec![tx_honest_proposer.clone()])
+        .unwrap();
+
+    // Other nodes (including equivocator initially) propose empty for themselves,
+    // but will participate in ABA for target_proposer_for_aba.
+    // let mut expected_final_batches = HashSet::new(); // Not strictly needed for
+    // this test's core assertion expected_final_batches.
+    // insert((target_proposer_for_aba, batch_honest_proposer.clone()));
+
+    for &node_id in &node_ids {
+        if node_id != target_proposer_for_aba {
+            harness
+                .propose_on_node(node_id, epoch_to_test, vec![]) // Empty proposal
+                .unwrap();
+            // expected_final_batches.insert((node_id, Batch::new(vec![])));
+        }
+    }
+
+    // --- Let RBCs run partially to trigger ABAs ---
+    // Run a few steps to get RBCs for target_proposer_for_aba to deliver and ABAs
+    // to start. We expect ABA for target_proposer_for_aba to start with
+    // EST(true, 0) from all nodes.
+    for _ in 0..50 {
+        // Adjust steps as needed
+        if harness.network_queue.is_empty() && harness.timers.is_empty() {
+            break;
+        }
+        harness.step();
+    }
+
+    // --- Equivocating Node sends conflicting EST for the target ABA instance ---
+    // Original EST from node 0 for ABA(target_proposer_for_aba) would have been
+    // EST(true, 0) Now, inject EST(false, 0) from node 0 for the same ABA
+    // instance.
+    let est_equivocating_msg = honeybadger::HoneyBadgerMessage::Aba(honeybadger::AbaMessage {
+        pub_batch_proposer_id: target_proposer_for_aba,
+        pub_epoch: epoch_to_test,
+        pub_content: honeybadger::AbaMessageContent::Est { value: false, round: 0 }, /* Conflicting value */
+        pub_sender_id: equivocating_node_id,
+    });
+    harness.inject_message(est_equivocating_msg);
+    println!(
+        "ABA EST Equivocation Test: Injected conflicting EST(false,0) from node \
+         {equivocating_node_id} for ABA of proposer {target_proposer_for_aba}."
+    );
+
+    // --- Run simulation to completion ---
+    let max_steps = 1500;
+    for i in 0..max_steps {
+        if harness.all_nodes_decided_epoch(epoch_to_test) {
+            // Further check if all nodes have the expected number of batches
+            let mut all_correct_count = true;
+            for &id_check in &node_ids {
+                if harness
+                    .finalized_outputs
+                    .get(&id_check)
+                    .and_then(|epoch_map| epoch_map.get(&epoch_to_test))
+                    .is_none_or(|batches| batches.len() != num_nodes)
+                {
+                    // Expect N batches
+                    all_correct_count = false;
+                    break;
+                }
+            }
+            if all_correct_count {
+                break;
+            }
+        }
+        if !harness.step() && harness.network_queue.is_empty() && harness.timers.is_empty() {
+            panic!("ABA EST Equivocation Test: Simulation stalled at step {i}");
+        }
+        if i == max_steps - 1 {
+            panic!("ABA EST Equivocation Test: Max simulation steps reached");
+        }
+    }
+
+    // --- Assertions ---
+    assert!(
+        harness.all_nodes_decided_epoch(epoch_to_test),
+        "ABA EST Equivocation Test: Not all nodes decided on epoch {epoch_to_test}"
+    );
+
+    // The key is that all nodes (including the equivocator, as its own HBBFT
+    // instance will also process these messages) should still agree on the
+    // *same set* of batches for the epoch. The EST equivocation might influence
+    // whether target_proposer_for_aba's batch is included or excluded, but all
+    // correct nodes (and the equivocator in this model) should arrive at the
+    // same conclusion for the epoch's content.
+
+    let mut first_node_final_set: Option<HashSet<(NodeId, Batch)>> = None;
+    for &node_id_check in &node_ids {
+        let node_output_for_epoch = harness
+            .finalized_outputs
+            .get(&node_id_check)
+            .unwrap()
+            .get(&epoch_to_test)
+            .unwrap();
+        let current_decided_set: HashSet<(NodeId, Batch)> = node_output_for_epoch
+            .iter()
+            .map(|db| (db.proposer_id, db.batch.clone()))
+            .collect();
+
+        if first_node_final_set.is_none() {
+            first_node_final_set = Some(current_decided_set.clone());
+            println!(
+                "ABA EST Equivocation Test: Node {node_id_check} (first checked) decided on {} \
+                 batches.",
+                node_output_for_epoch.len()
+            );
+        } else {
+            assert_eq!(
+                &current_decided_set,
+                first_node_final_set.as_ref().unwrap(),
+                "Node {node_id_check} has a different set of decided batches than other nodes. \
+                 Equivocation may have caused divergence."
+            );
+        }
+        assert_eq!(
+            node_output_for_epoch.len(),
+            num_nodes,
+            "Node {node_id_check} should have decided on {num_nodes} batches"
+        );
+    }
+    assert!(first_node_final_set.is_some(), "No nodes to compare output.");
+
+    println!(
+        "ABA EST Equivocation Test: Passed. All nodes reached a consistent decision for epoch \
+         {epoch_to_test}."
+    );
+}
+
+#[test]
 fn rbc_timeout_proposer_silent() {
     let num_nodes = 4;
     // let f = (num_nodes - 1) / 3; // f=1
