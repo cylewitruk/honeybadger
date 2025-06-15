@@ -339,6 +339,195 @@ fn state_pruning_works() {
 }
 
 #[test]
+fn fault_tolerance_f_crashed_nodes() {
+    let num_nodes = 4;
+    let f = (num_nodes - 1) / 3; // f=1 for N=4
+    assert_eq!(f, 1, "This test is designed for N=4, F=1");
+
+    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let mut harness = TestHarness::new(node_ids.clone());
+
+    // --- Epoch 0: All nodes are honest and propose ---
+    let epoch0: EpochNum = DEFAULT_EPOCH;
+    println!("Fault Tolerance Test: Starting Epoch 0 (all honest)");
+    let mut expected_batches_e0_set = HashSet::new();
+    for &proposer_id in &node_ids {
+        let tx_content: u8 = proposer_id as u8; // Unique content
+        let tx: Transaction = vec![tx_content];
+        let batch = Batch::new(vec![tx]);
+        expected_batches_e0_set.insert((proposer_id, batch.clone()));
+        harness
+            .propose_on_node(proposer_id, epoch0, vec![vec![tx_content]])
+            .unwrap();
+    }
+
+    let max_steps_e0 = 500;
+    for i in 0..max_steps_e0 {
+        if harness.all_nodes_decided_epoch(epoch0)
+            && node_ids.iter().all(|id| {
+                harness
+                    .finalized_outputs
+                    .get(id)
+                    .is_some_and(|e_map| {
+                        e_map
+                            .get(&epoch0)
+                            .is_some_and(|b_vec| b_vec.len() == num_nodes)
+                    })
+            })
+        {
+            break;
+        }
+        if !harness.step() && harness.network_queue.is_empty() && harness.timers.is_empty() {
+            panic!("Fault Tolerance Test: Epoch 0 stalled at step {i}");
+        }
+        if i == max_steps_e0 - 1 {
+            panic!("Fault Tolerance Test: Epoch 0 max steps reached");
+        }
+    }
+    assert!(harness.all_nodes_decided_epoch(epoch0), "Epoch 0 did not finalize for all nodes");
+    println!("Fault Tolerance Test: Epoch 0 finalized by all nodes.");
+
+    // --- Crash F nodes ---
+    let nodes_to_crash: Vec<NodeId> = node_ids
+        .iter()
+        .take(f)
+        .copied()
+        .collect();
+    harness.crash_nodes(&nodes_to_crash);
+    let correct_node_ids: Vec<NodeId> = node_ids
+        .iter()
+        .filter(|id| !nodes_to_crash.contains(id))
+        .copied()
+        .collect();
+    assert_eq!(correct_node_ids.len(), num_nodes - f);
+
+    // --- Epoch 1: F nodes are crashed, N-F nodes propose ---
+    let epoch1: EpochNum = epoch0 + 1;
+    println!("Fault Tolerance Test: Starting Epoch 1 ({f} nodes crashed: {nodes_to_crash:?})");
+
+    let mut expected_batches_e1_set = HashSet::new();
+    for &proposer_id in &correct_node_ids {
+        // Ensure correct nodes are at epoch1
+        assert_eq!(
+            harness
+                .nodes
+                .get(&proposer_id)
+                .unwrap()
+                .hbbft
+                .current_epoch(),
+            epoch1,
+            "Node {proposer_id} not at epoch {epoch1}"
+        );
+
+        let tx_content: u8 = proposer_id as u8 + 10; // Unique content for epoch 1
+        let tx: Transaction = vec![tx_content];
+        let batch = Batch::new(vec![tx.clone()]);
+        expected_batches_e1_set.insert((proposer_id, batch.clone()));
+
+        // Submit the transaction to the node's pending buffer first
+        harness.submit_tx_to_node(proposer_id, tx);
+
+        harness
+            .prepare_and_propose_on_node(proposer_id, epoch1) // Use prepare_and_propose for auto-proposal
+            .unwrap();
+    }
+
+    let max_steps_e1 = 1000; // Give more steps due to timeouts for crashed nodes
+    for i in 0..max_steps_e1 {
+        if harness.all_correct_nodes_decided_epoch(epoch1)
+            && correct_node_ids.iter().all(|id| {
+                harness
+                    .finalized_outputs
+                    .get(id)
+                    .is_some_and(|e_map| {
+                        e_map
+                            .get(&epoch1)
+                            .is_some_and(|b_vec| b_vec.len() == num_nodes - f)
+                    })
+            })
+        {
+            break;
+        }
+        if !harness.step() && harness.network_queue.is_empty() && harness.timers.is_empty() {
+            // Check if only crashed nodes' timers are left, or if correct nodes are
+            // genuinely stalled
+            let mut active_timers_for_correct_nodes = false;
+            for expiries in harness.timers.values() {
+                for expiry in expiries {
+                    let (timer_epoch, timer_proposer) = match expiry {
+                        TimerExpiry::AbaRoundTimeout { epoch, batch_proposer_id, .. } => {
+                            (*epoch, *batch_proposer_id)
+                        }
+                        TimerExpiry::RbcTimeout { epoch, proposer_id } => (*epoch, *proposer_id),
+                    };
+                    if timer_epoch == epoch1 && !nodes_to_crash.contains(&timer_proposer) {
+                        active_timers_for_correct_nodes = true;
+                        break;
+                    }
+                }
+                if active_timers_for_correct_nodes {
+                    break;
+                }
+            }
+            if !active_timers_for_correct_nodes && harness.network_queue.is_empty() {
+                if harness.all_correct_nodes_decided_epoch(epoch1) {
+                    break;
+                } // They might have decided just now
+                panic!("Fault Tolerance Test: Epoch 1 stalled for correct nodes at step {i}");
+            }
+        }
+        if i == max_steps_e1 - 1 {
+            panic!(
+                "Fault Tolerance Test: Epoch 1 max steps reached. Correct nodes: \
+                 {correct_node_ids:?}. Crashed: {nodes_to_crash:?}"
+            );
+        }
+    }
+
+    assert!(
+        harness.all_correct_nodes_decided_epoch(epoch1),
+        "Epoch 1 did not finalize for all correct nodes"
+    );
+
+    for &node_id in &correct_node_ids {
+        let node_output_e1 = harness
+            .finalized_outputs
+            .get(&node_id)
+            .unwrap()
+            .get(&epoch1)
+            .unwrap();
+        assert_eq!(
+            node_output_e1.len(),
+            num_nodes - f,
+            "Node {node_id} (correct) decided on wrong number of batches for epoch 1"
+        );
+
+        let decided_set_for_node: HashSet<(NodeId, Batch)> = node_output_e1
+            .iter()
+            .map(|db| (db.proposer_id, db.batch.clone()))
+            .collect();
+        assert_eq!(
+            decided_set_for_node, expected_batches_e1_set,
+            "Node {node_id} (correct) has incorrect batch set for epoch 1"
+        );
+    }
+
+    for &crashed_node_id in &nodes_to_crash {
+        assert!(
+            !harness
+                .finalized_outputs
+                .get(&crashed_node_id)
+                .is_some_and(|e_map| e_map.contains_key(&epoch1)),
+            "Crashed node {crashed_node_id} should not have finalized epoch 1"
+        );
+    }
+
+    println!(
+        "Fault Tolerance Test: Epoch 1 finalized by correct nodes with {f} nodes crashed. Passed."
+    );
+}
+
+#[test]
 fn rbc_timeout_proposer_silent() {
     let num_nodes = 4;
     // let f = (num_nodes - 1) / 3; // f=1

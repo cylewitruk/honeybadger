@@ -171,6 +171,7 @@ pub struct TestHarness {
     /// Tracks which epoch outputs have been collected from each node
     pub finalized_outputs: HashMap<NodeId, HashMap<EpochNum, Vec<DecidedBatch>>>,
     pub num_nodes: usize,
+    pub crashed_nodes: HashSet<NodeId>,
 }
 
 impl TestHarness {
@@ -194,6 +195,7 @@ impl TestHarness {
             current_time: Instant::now(),
             finalized_outputs: HashMap::new(),
             num_nodes,
+            crashed_nodes: HashSet::new(),
         }
     }
 
@@ -220,10 +222,22 @@ impl TestHarness {
             current_time: Instant::now(),
             finalized_outputs: HashMap::new(),
             num_nodes,
+            crashed_nodes: HashSet::new(),
+        }
+    }
+
+    pub fn crash_nodes(&mut self, nodes_to_crash: &[NodeId]) {
+        for &node_id in nodes_to_crash {
+            self.crashed_nodes.insert(node_id);
+            println!("[TestHarness] Node {node_id} marked as crashed.");
         }
     }
 
     pub fn submit_tx_to_node(&mut self, node_id: NodeId, tx: Transaction) {
+        if self.crashed_nodes.contains(&node_id) {
+            return;
+        }
+
         if let Some(node) = self.nodes.get_mut(&node_id) {
             match node.hbbft.submit_transaction(tx) {
                 Ok(output) => self.process_hbbft_output(node_id, output),
@@ -238,6 +252,10 @@ impl TestHarness {
         epoch: EpochNum,
         batch_txs: Vec<Transaction>,
     ) -> Result<(), HbbftError> {
+        if self.crashed_nodes.contains(&node_id) {
+            return Ok(());
+        }
+
         if let Some(node) = self.nodes.get_mut(&node_id) {
             let output = node
                 .hbbft
@@ -252,6 +270,13 @@ impl TestHarness {
         node_id_to_propose: NodeId,
         target_epoch: EpochNum,
     ) -> Result<(), HbbftError> {
+        if self
+            .crashed_nodes
+            .contains(&node_id_to_propose)
+        {
+            return Ok(());
+        }
+
         let mut outputs_to_process: Vec<(NodeId, HbbftProcessOutput)> = Vec::new();
 
         if let Some(node) = self.nodes.get_mut(&node_id_to_propose) {
@@ -342,10 +367,24 @@ impl TestHarness {
         let mut outputs_to_process: Vec<(NodeId, HbbftProcessOutput)> = Vec::new();
 
         if let Some(message) = self.network_queue.pop_front() {
+            if self
+                .crashed_nodes
+                .contains(&message.sender_id())
+            {
+                // Message from a crashed node, discard it.
+                // eprintln!("[TestHarness] Discarding message from crashed sender {}",
+                // message.sender_id());
+                return true; // Progress was made (message discarded)
+            }
+
             // Deliver to all nodes (except sender, though HBBFT should handle that)
             // In a real network, you'd route to specific recipients if applicable,
             // or broadcast. HBBFT messages are generally broadcast.
             for (id, node) in self.nodes.iter_mut() {
+                if self.crashed_nodes.contains(id) {
+                    continue;
+                } // Don't deliver to crashed nodes
+
                 // Clone message for each recipient
                 match node
                     .hbbft
@@ -383,6 +422,9 @@ impl TestHarness {
                         // For RBC, it's specific to proposer_id's RBC instance on each node.
                         // The HBBFT instance itself will route it internally.
                         for (id, node) in self.nodes.iter_mut() {
+                            if self.crashed_nodes.contains(id) {
+                                continue;
+                            } // Don't deliver timer expiries to crashed nodes
                             match node
                                 .hbbft
                                 .handle_timer_expiry(expiry_event.clone())
@@ -434,10 +476,16 @@ impl TestHarness {
     }
 
     pub fn all_nodes_decided_epoch(&self, epoch: EpochNum) -> bool {
-        if self.finalized_outputs.len() < self.num_nodes {
-            return false; // Not all nodes have even reported any output yet
-        }
+        // This method now implicitly checks only non-crashed nodes if they are expected
+        // to decide. For a more general "all *active* nodes decided", the
+        // calling test needs to manage expectations. Here, we check if *all
+        // originally configured* nodes have an entry, which might be too strict
+        // if some are crashed and not expected to decide.
+        // Let's adjust to check only non-crashed nodes.
         for node_id in self.nodes.keys() {
+            if self.crashed_nodes.contains(node_id) {
+                continue;
+            }
             match self.finalized_outputs.get(node_id) {
                 Some(epochs_data) => {
                     if !epochs_data.contains_key(&epoch) {
@@ -448,5 +496,25 @@ impl TestHarness {
             }
         }
         true
+    }
+
+    pub fn all_correct_nodes_decided_epoch(&self, epoch: EpochNum) -> bool {
+        for node_id in self.nodes.keys() {
+            if self.crashed_nodes.contains(node_id) {
+                continue; // Skip crashed nodes
+            }
+            match self.finalized_outputs.get(node_id) {
+                Some(epochs_data) => {
+                    if !epochs_data.contains_key(&epoch) {
+                        return false;
+                    }
+                }
+                None => return false, // A correct node has no finalized data at all
+            }
+        }
+        // Ensure at least one correct node decided if all are crashed (edge case)
+        self.nodes
+            .keys()
+            .any(|id| !self.crashed_nodes.contains(id))
     }
 }
