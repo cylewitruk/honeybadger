@@ -197,6 +197,32 @@ impl TestHarness {
         }
     }
 
+    pub fn new_with_config_modifier(
+        node_ids: Vec<NodeId>,
+        config_modifier: impl Fn(usize, usize, NodeId) -> Arc<HoneyBadgerConfig>,
+    ) -> Self {
+        let mut nodes = HashMap::new();
+        let num_nodes = node_ids.len();
+        let f = (num_nodes - 1) / 3; // Max faulty nodes
+
+        for &id in &node_ids {
+            // For integration tests, we'll use the MockInteractiveCoin
+            let config = config_modifier(num_nodes, f, id);
+
+            let hbbft = HoneyBadgerBft::new(config.as_ref().clone(), DEFAULT_EPOCH);
+            nodes.insert(id, SimulatedNode { hbbft, id });
+        }
+
+        TestHarness {
+            nodes,
+            network_queue: VecDeque::new(),
+            timers: BTreeMap::new(),
+            current_time: Instant::now(),
+            finalized_outputs: HashMap::new(),
+            num_nodes,
+        }
+    }
+
     pub fn submit_tx_to_node(&mut self, node_id: NodeId, tx: Transaction) {
         if let Some(node) = self.nodes.get_mut(&node_id) {
             match node.hbbft.submit_transaction(tx) {

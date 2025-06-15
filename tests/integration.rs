@@ -1,7 +1,7 @@
 // This content is intended for tests/integration.rs
 
 use std::collections::HashSet;
-
+use honeybadger::TimerExpiry;
 use honeybadger::testing::{DEFAULT_EPOCH, TestHarness};
 use honeybadger::{Batch, EpochNum, NodeId, Transaction}; // Added Batch and Transaction // For comparing sets of decided batches
 
@@ -196,6 +196,221 @@ fn happy_path_all_n_nodes_propose() {
         );
     }
     println!("Epoch 1 successfully finalized by all nodes.");
+}
+
+#[test]
+fn rbc_timeout_proposer_silent() {
+    let num_nodes = 4;
+    // let f = (num_nodes - 1) / 3; // f=1
+    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let mut harness = TestHarness::new(node_ids.clone());
+
+    let silent_proposer_id: NodeId = 0;
+    let epoch_to_test: EpochNum = DEFAULT_EPOCH;
+
+    // Other nodes prepare to participate in epoch 0.
+    // They will expect a proposal from silent_proposer_id.
+    // Their own proposals will be empty.
+    let mut expected_decided_batches_set = HashSet::new();
+    for &node_id in &node_ids {
+        if node_id != silent_proposer_id {
+            harness
+                .prepare_and_propose_on_node(node_id, epoch_to_test)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "Prepare and propose failed for node {node_id} on epoch {epoch_to_test}: \
+                         {e:?}"
+                    )
+                });
+            let empty_batch = Batch::new(vec![]);
+            expected_decided_batches_set.insert((node_id, empty_batch));
+        }
+    }
+
+    // Check that SetRbcTimeout requests were generated for the silent proposer.
+    // These timers are set when ensure_epoch_active_and_get_timers is called.
+    let mut rbc_timeout_found_for_silent_proposer = false;
+    for (_expiry_instant, timer_expiries) in harness.timers.iter() {
+        for timer_expiry in timer_expiries {
+            if let TimerExpiry::RbcTimeout { epoch, proposer_id: timer_proposer_id } = timer_expiry
+            {
+                if *epoch == epoch_to_test && *timer_proposer_id == silent_proposer_id {
+                    rbc_timeout_found_for_silent_proposer = true;
+                    break;
+                }
+            }
+        }
+        if rbc_timeout_found_for_silent_proposer {
+            break;
+        }
+    }
+    assert!(
+        rbc_timeout_found_for_silent_proposer,
+        "SetRbcTimeout for silent proposer {silent_proposer_id} in epoch {epoch_to_test} was not \
+         found."
+    );
+
+    // Run the simulation loop
+    let max_steps = 1000;
+    for i in 0..max_steps {
+        if harness.all_nodes_decided_epoch(epoch_to_test) {
+            let mut all_have_correct_num_batches = true;
+            for node_id_check in &node_ids {
+                if let Some(epochs_data) = harness.finalized_outputs.get(node_id_check) {
+                    if let Some(batches) = epochs_data.get(&epoch_to_test) {
+                        if batches.len() != num_nodes - 1 {
+                            all_have_correct_num_batches = false;
+                            break;
+                        }
+                    } else {
+                        all_have_correct_num_batches = false;
+                        break;
+                    }
+                } else {
+                    all_have_correct_num_batches = false;
+                    break;
+                }
+            }
+            if all_have_correct_num_batches {
+                break;
+            }
+        }
+
+        if !harness.step() && harness.network_queue.is_empty() && harness.timers.is_empty() {
+            panic!("RBC Timeout Test: Simulation stalled at step {i}");
+        }
+        if i == max_steps - 1 {
+            panic!("RBC Timeout Test: Max simulation steps reached");
+        }
+    }
+
+    assert!(
+        harness.all_nodes_decided_epoch(epoch_to_test),
+        "RBC Timeout Test: Not all nodes decided on epoch {epoch_to_test}",
+    );
+
+    for node_id_check in &node_ids {
+        let node_output_for_epoch = harness
+            .finalized_outputs
+            .get(node_id_check)
+            .unwrap_or_else(|| panic!("Node {node_id_check} should have output"))
+            .get(&epoch_to_test)
+            .unwrap_or_else(|| {
+                panic!("Node {node_id_check} should have output for epoch {epoch_to_test}")
+            });
+
+        assert_eq!(
+            node_output_for_epoch.len(),
+            num_nodes - 1,
+            "Node {node_id_check} decided on {count} batches, expected {expected_count}",
+            count = node_output_for_epoch.len(),
+            expected_count = num_nodes - 1
+        );
+
+        let decided_set_for_node: HashSet<(NodeId, Batch)> = node_output_for_epoch
+            .iter()
+            .map(|db| (db.proposer_id, db.batch.clone()))
+            .collect();
+        assert_eq!(decided_set_for_node, expected_decided_batches_set);
+
+        for decided_batch_info in node_output_for_epoch {
+            assert_ne!(decided_batch_info.proposer_id, silent_proposer_id);
+        }
+    }
+    println!(
+        "RBC Timeout Test for silent proposer {silent_proposer_id} in epoch {epoch_to_test} \
+         passed."
+    );
+}
+
+#[test]
+fn aba_round_timeout_and_recovery() {
+    let num_nodes = 4;
+    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    // Use a harness with DummyCommonCoin for this test, as we are testing
+    // the timeout fallback and immediate coin paths, not share exchange.
+    let mut harness =
+        TestHarness::new_with_config_modifier(node_ids.clone(), |num_nodes, f, id| {
+            honeybadger::testing::create_dummy_config(num_nodes, f, id)
+        });
+
+    let proposer_id: NodeId = 0;
+    let epoch_to_test: EpochNum = DEFAULT_EPOCH;
+
+    let tx1: Transaction = vec![7, 8, 9];
+    let proposed_batch_txs = vec![tx1.clone()];
+    let expected_batch = Batch::new(proposed_batch_txs.clone());
+
+    harness
+        .propose_on_node(proposer_id, epoch_to_test, proposed_batch_txs)
+        .expect("Propose failed");
+
+    // Phase 1: Let RBC deliver and ABA start (timer for round 0 set)
+    let mut aba_r0_timer_is_set = false;
+    for i in 0..200 {
+        harness.step();
+        for timer_expiries in harness.timers.values() {
+            for timer_expiry in timer_expiries {
+                if let TimerExpiry::AbaRoundTimeout { epoch, batch_proposer_id: bp_id, round } =
+                    timer_expiry
+                {
+                    if *epoch == epoch_to_test && *bp_id == proposer_id && *round == 0 {
+                        aba_r0_timer_is_set = true;
+                        break;
+                    }
+                }
+            }
+            if aba_r0_timer_is_set {
+                break;
+            }
+        }
+        if aba_r0_timer_is_set {
+            println!(
+                "ABA Timeout Test: Phase 1 condition met at step {i}. ABA round 0 timer for \
+                 proposer {proposer_id} is set."
+            );
+            break;
+        }
+        if i == 199 {
+            panic!(
+                "ABA Timeout Test: Max steps reached in phase 1. ABA round 0 timer for proposer \
+                 {proposer_id} was not set."
+            );
+        }
+    }
+    assert!(aba_r0_timer_is_set, "ABA round 0 timer was not set.");
+
+    // Phase 2: Induce timeout for round 0 by clearing the message queue.
+    // This ensures that the ABA round 0 timer will expire because EST/AUX messages
+    // for round 0 won't be able to lead to a decision.
+    harness.network_queue.clear();
+    println!("ABA Timeout Test: Network queue cleared to induce ABA round 0 timeout.");
+
+    // Phase 3: Run simulation until epoch finalizes
+    let max_steps_phase3 = 1000;
+    for i in 0..max_steps_phase3 {
+        if harness.all_nodes_decided_epoch(epoch_to_test) {
+            // Once all nodes have decided the epoch, we can break.
+            // The assertions outside the loop will verify the content.
+            println!("ABA Timeout Test: All nodes decided epoch {epoch_to_test} at step {i} of phase 3.");
+            break;
+        }
+        if !harness.step() && harness.network_queue.is_empty() && harness.timers.is_empty() {
+            panic!("ABA Timeout Test: Simulation stalled in phase 3 at step {i}");
+        }
+        if i == max_steps_phase3 - 1 {
+            panic!("ABA Timeout Test: Max simulation steps reached in phase 3");
+        }
+    }
+
+    assert!(harness.all_nodes_decided_epoch(epoch_to_test));
+    for node_id_check in &node_ids {
+        let node_output = harness.finalized_outputs.get(node_id_check).unwrap().get(&epoch_to_test).unwrap();
+        assert_eq!(node_output.len(), 1);
+        assert_eq!(node_output[0].proposer_id, proposer_id);
+        assert_eq!(node_output[0].batch, expected_batch);
+    }
+    println!("ABA Timeout Test: Epoch {epoch_to_test} finalized successfully after ABA timeout.");
 }
 
 #[test]
