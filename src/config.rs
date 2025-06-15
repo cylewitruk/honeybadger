@@ -102,3 +102,101 @@ impl HoneyBadgerConfig {
         self.num_total_nodes - self.num_faulty_nodes // N - F
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::types::NodeId;
+
+    fn create_node_ids(n: usize) -> BTreeSet<NodeId> {
+        (0..n as NodeId).collect()
+    }
+
+    #[test]
+    fn config_new_valid() {
+        let all_ids = create_node_ids(4);
+        let config = HoneyBadgerConfig::new(0, all_ids, 1, 3, 1000, 2000);
+        assert!(config.is_ok());
+        let config = config.unwrap();
+        assert_eq!(config.num_total_nodes, 4);
+        assert_eq!(config.num_faulty_nodes, 1);
+    }
+
+    #[test]
+    fn config_new_n_zero() {
+        let all_ids = create_node_ids(0);
+        let config = HoneyBadgerConfig::new(0, all_ids, 0, 3, 1000, 2000);
+        assert!(config.is_err());
+        assert_eq!(config.unwrap_err(), "Total number of nodes (N) cannot be zero.");
+    }
+
+    #[test]
+    fn config_new_f_ge_n() {
+        let all_ids = create_node_ids(3);
+        let config = HoneyBadgerConfig::new(0, all_ids.clone(), 3, 3, 1000, 2000); // F = N
+        assert!(config.is_err());
+        assert_eq!(
+            config.unwrap_err(),
+            "Number of faulty nodes (F) must be less than total nodes (N)."
+        );
+
+        let config_f_gt_n = HoneyBadgerConfig::new(0, all_ids, 4, 3, 1000, 2000); // F > N
+        assert!(config_f_gt_n.is_err());
+    }
+
+    #[test]
+    fn config_new_n_lt_3f_plus_1() {
+        let all_ids = create_node_ids(3); // N=3
+        let config = HoneyBadgerConfig::new(0, all_ids, 1, 3, 1000, 2000); // F=1. N=3, 3F+1=4. N < 3F+1
+        assert!(config.is_err());
+        assert_eq!(
+            config.unwrap_err(),
+            "Invalid configuration: N (3) must be >= 3F (1) + 1. N=3 F=1"
+        );
+    }
+
+    #[test]
+    fn config_new_own_id_not_in_all_ids() {
+        let all_ids = create_node_ids(4);
+        let config = HoneyBadgerConfig::new(5, all_ids, 1, 3, 1000, 2000); // own_id 5 not in 0..3
+        assert!(config.is_err());
+        assert_eq!(config.unwrap_err(), "Own ID 5 not found in the set of all node IDs.");
+    }
+
+    #[test]
+    fn config_new_epochs_to_retain_state_zero() {
+        let all_ids = create_node_ids(4);
+        let config = HoneyBadgerConfig::new(0, all_ids, 1, 0, 1000, 2000);
+        assert!(config.is_err());
+        assert_eq!(config.unwrap_err(), "epochs_to_retain_state must be at least 1.");
+    }
+
+    #[test]
+    fn config_new_timeout_zero() {
+        let all_ids = create_node_ids(4);
+        let config_aba_timeout = HoneyBadgerConfig::new(0, all_ids.clone(), 1, 3, 0, 2000);
+        assert!(config_aba_timeout.is_err());
+        assert_eq!(
+            config_aba_timeout.unwrap_err(),
+            "default_aba_round_timeout_ms must be greater than 0."
+        );
+
+        let config_rbc_timeout = HoneyBadgerConfig::new(0, all_ids, 1, 3, 1000, 0);
+        assert!(config_rbc_timeout.is_err());
+        assert_eq!(
+            config_rbc_timeout.unwrap_err(),
+            "default_rbc_instance_timeout_ms must be greater than 0."
+        );
+    }
+
+    #[test]
+    fn config_threshold_methods() {
+        let all_ids = create_node_ids(7); // N=7
+        let config = HoneyBadgerConfig::new(0, all_ids, 2, 3, 1000, 2000).unwrap(); // F=2
+        assert_eq!(config.high_threshold(), 5); // N-F = 7-2 = 5
+        assert_eq!(config.low_threshold(), 3); // F+1 = 2+1 = 3
+        assert_eq!(config.aba_quorum_threshold(), 5); // N-F = 7-2 = 5
+    }
+}
