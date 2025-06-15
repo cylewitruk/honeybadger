@@ -1,24 +1,41 @@
-// This content is intended for src/config.rs
-
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::EpochNum;
-use crate::aba::CommonCoin; // Import the CommonCoin trait
-use crate::types::{AbaRound, NodeId}; // For aba_max_future_round_window
+use crate::aba::CommonCoin;
+use crate::types::{AbaRound, NodeId};
 
-// Default values for configuration
+/// Default number of recent finalized epochs for which to retain detailed
+/// protocol state.
 const DEFAULT_EPOCHS_TO_RETAIN_STATE: EpochNum = 3;
+/// Default timeout duration in milliseconds for an ABA round.
 const DEFAULT_ABA_ROUND_TIMEOUT_MS: u64 = 2000;
+/// Default timeout duration in milliseconds for an RBC instance.
 const DEFAULT_RBC_INSTANCE_TIMEOUT_MS: u64 = 5000;
+/// Default maximum number of rounds into the future for which an ABA instance
+/// will queue messages.
 const DEFAULT_ABA_MAX_FUTURE_ROUND_WINDOW: AbaRound = 5;
 
 /// A factory function for creating CommonCoin instances.
+///
+/// This type alias defines the signature for a function that can produce
+/// `CommonCoin` trait objects. It's used by `CoinFactory` to allow
+/// dependency injection of different common coin mechanisms.
 type ActualCoinFactoryFn =
     dyn Fn(NodeId, EpochNum, Arc<HoneyBadgerConfig>) -> Box<dyn CommonCoin> + Send + Sync;
 
-/// Wrapper for the CoinFactory to allow HoneyBadgerConfig to derive Debug and
-/// Clone.
+/// A wrapper for a common coin factory function.
+///
+/// This struct encapsulates the logic for creating `CommonCoin` instances.
+/// It's designed to be cloneable and debuggable, facilitating its use within
+/// `HoneyBadgerConfig`. The actual factory function is wrapped in an `Arc`
+/// to allow shared ownership.
+///
+/// ## Notes
+/// - The primary purpose of this wrapper is to enable `HoneyBadgerConfig` to
+///   derive `Clone` and `Debug`, as function pointers or `dyn Fn` types
+///   themselves don't directly support these traits in a straightforward manner
+///   for struct derivation.
 pub struct CoinFactory(Arc<ActualCoinFactoryFn>);
 
 impl CoinFactory {
@@ -26,7 +43,17 @@ impl CoinFactory {
         CoinFactory(factory_fn)
     }
 
-    // Allows calling the wrapped factory
+    /// Creates a new `CommonCoin` instance using the wrapped factory function.
+    ///
+    /// ## Arguments
+    ///
+    /// * `node_id`: The ID of the node for which the coin is being created.
+    /// * `epoch_num`: The epoch number for which the coin will be used.
+    /// * `config`: A shared reference to the `HoneyBadgerConfig`.
+    ///
+    /// ## Returns
+    ///
+    /// A `Box<dyn CommonCoin>` instance.
     pub fn create_coin(
         &self,
         node_id: NodeId,
@@ -37,23 +64,42 @@ impl CoinFactory {
     }
 }
 
+/// Configuration for a HoneyBadgerBFT instance.
+///
+/// This struct holds all necessary parameters for initializing and running
+/// a HoneyBadgerBFT node. It includes network information, fault tolerance
+/// parameters, timeout settings, and a factory for creating common coin
+/// instances.
+///
+/// It is recommended to use `HoneyBadgerConfigBuilder` to construct instances
+/// of this struct to ensure all parameters are validated.
 #[derive(Clone, Debug)]
 pub struct HoneyBadgerConfig {
-    pub own_id: NodeId,                 // ID of this node
-    pub all_node_ids: BTreeSet<NodeId>, // Set of all node IDs in the network
-    pub num_total_nodes: usize,         // N: Total number of nodes
-    pub num_faulty_nodes: usize,        /* F: Maximum number of faulty nodes to tolerate (e.g.,
-                                         * N = 3F + 1)
-                                         * Other parameters might include:
-                                         * - Timeout values (though HBBFT is asynchronous,
-                                         *   practical implementations might use timeouts)
-                                         * - Threshold crypto public keys / key shares
-                                         * - Max batch size, etc. */
-    // Number of recent finalized epochs for which to retain detailed protocol state.
+    /// The ID of the node this configuration belongs to.
+    pub own_id: NodeId,
+    /// A sorted set of all node IDs participating in the consensus.
+    pub all_node_ids: BTreeSet<NodeId>,
+    /// `N`: The total number of nodes in the network.
+    pub num_total_nodes: usize,
+    /// `F`: The maximum number of faulty (Byzantine) nodes the system is
+    /// configured to tolerate. Typically, `N >= 3F + 1`.
+    pub num_faulty_nodes: usize,
+    /// The number of recent finalized epochs for which detailed protocol state
+    /// (like RBC/ABA instances and messages) should be retained. Older state
+    /// will be pruned.
     pub epochs_to_retain_state: EpochNum,
+    /// The default timeout duration in milliseconds for an ABA (Asynchronous
+    /// Binary Agreement) round.
     pub default_aba_round_timeout_ms: u64,
+    /// The default timeout duration in milliseconds for an RBC (Reliable
+    /// Broadcast) instance if it doesn't receive a `VAL` message from its
+    /// proposer.
     pub default_rbc_instance_timeout_ms: u64,
+    /// A factory for creating `CommonCoin` instances for ABA sub-protocols.
     pub coin_factory: CoinFactory,
+    /// The maximum number of rounds into the future (relative to an ABA
+    /// instance's current round) for which it will queue received `EST` or
+    /// `AUX` messages.
     pub aba_max_future_round_window: AbaRound,
 }
 
@@ -71,6 +117,11 @@ impl std::fmt::Debug for CoinFactory {
     }
 }
 
+/// A builder for creating `HoneyBadgerConfig` instances.
+///
+/// This builder provides a fluent API for setting configuration parameters
+/// and includes validation logic in its `build` method to ensure a consistent
+/// and valid configuration.
 #[derive(Debug)]
 pub struct HoneyBadgerConfigBuilder {
     // Mandatory fields
@@ -89,7 +140,7 @@ pub struct HoneyBadgerConfigBuilder {
 impl HoneyBadgerConfigBuilder {
     /// Creates a new builder for `HoneyBadgerConfig`.
     ///
-    /// # Arguments
+    /// ## Arguments
     ///
     /// * `own_id`: The ID of this node.
     /// * `all_node_ids`: A set of all node IDs in the network.
@@ -114,27 +165,50 @@ impl HoneyBadgerConfigBuilder {
         }
     }
 
+    /// Sets the number of recent finalized epochs for which detailed protocol
+    /// state should be retained.
+    ///
+    /// Default: `DEFAULT_EPOCHS_TO_RETAIN_STATE` (3). Must be at least 1.
     pub fn epochs_to_retain_state(mut self, epochs: EpochNum) -> Self {
         self.epochs_to_retain_state = epochs;
         self
     }
 
+    /// Sets the default timeout duration in milliseconds for an ABA round.
+    ///
+    /// Default: `DEFAULT_ABA_ROUND_TIMEOUT_MS` (2000ms). Must be greater than
+    /// 0.
     pub fn default_aba_round_timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.default_aba_round_timeout_ms = timeout_ms;
         self
     }
 
+    /// Sets the default timeout duration in milliseconds for an RBC instance.
+    ///
+    /// Default: `DEFAULT_RBC_INSTANCE_TIMEOUT_MS` (5000ms). Must be greater
+    /// than 0.
     pub fn default_rbc_instance_timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.default_rbc_instance_timeout_ms = timeout_ms;
         self
     }
 
+    /// Sets the maximum number of future rounds for which an ABA instance will
+    /// queue messages.
+    ///
+    /// Messages for rounds beyond `current_round + window` will be discarded.
+    /// Default: `DEFAULT_ABA_MAX_FUTURE_ROUND_WINDOW` (5). Must be at least 1.
     pub fn aba_max_future_round_window(mut self, window: AbaRound) -> Self {
         self.aba_max_future_round_window = window;
         self
     }
 
     /// Builds the `HoneyBadgerConfig` after validating the parameters.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(HoneyBadgerConfig)`: If all parameters are valid.
+    /// * `Err(String)`: If any validation check fails, containing an error
+    ///   message.
     pub fn build(self) -> Result<HoneyBadgerConfig, String> {
         // Validation logic moved here from the old HoneyBadgerConfig::new
         let own_id = self.own_id; // To avoid self.own_id in format strings if self is consumed
@@ -186,40 +260,23 @@ impl HoneyBadgerConfigBuilder {
 }
 
 impl HoneyBadgerConfig {
-    // The old `new` method is effectively replaced by the builder's `new` and
-    // `build`. We keep the threshold methods.
-
-    // Quorum thresholds
+    /// Returns the high threshold for message counts, typically `N - F`.
+    ///
+    /// This is often used as a quorum size for strong agreement, e.g., needing
+    /// `N - F` `ECHO` or `READY` messages in RBC, or `N - F` `AUX` messages
+    /// in ABA to decide.
     pub fn high_threshold(&self) -> usize {
-        // Typically N - F
         self.num_total_nodes - self.num_faulty_nodes
     }
 
+    /// Returns the low threshold for message counts, typically `F + 1`.
+    ///
+    /// This is often used as a quorum size for weaker conditions or to ensure
+    /// at least one honest node is included, e.g., needing `F + 1` `EST`
+    /// messages to send an `AUX` in ABA, or `F + 1` `READY` messages to
+    /// relay a `READY` in RBC.
     pub fn low_threshold(&self) -> usize {
-        // Typically F + 1
         self.num_faulty_nodes + 1
-    }
-
-    pub fn aba_quorum_threshold(&self) -> usize {
-        // This often is N-F or related to what makes ABA proceed.
-        // A common choice for ABA related to Bracha's broadcast for example is N-F for
-        // echos, and F+1 for readies to ensure liveness, or N-2F if it's about
-        // common subset for votes. Let's assume F+1 for collecting enough
-        // ESTs/AUXs to send next message, and N-F for strong support (like for
-        // Ready in RBC or certain ABA states). This needs to be consistent with
-        // the specific ABA protocol being implemented. For now, using N-F for
-        // strong support, F+1 for weaker support. A typical threshold for
-        // collecting messages to make progress in ABA might be F+1. A threshold
-        // for forming a set for agreement in CONF might be N-F. The common coin
-        // often needs N-F shares. For collecting messages in steps of ABA, e.g.
-        // for receiving EST_i(v) from enough parties usually F+1 suffices for a
-        // some conditions, N-F for others. For Byzantine Agreement (BA) on a
-        // bit:
-        // - To set your own value based on others: need to see N-F proposals for one
-        //   value.
-        // - To accept a value as decided: need to see N-F confirmations.
-        // For now, this is a general "quorum". We might need more specific ones.
-        self.num_total_nodes - self.num_faulty_nodes // N - F
     }
 }
 
@@ -354,6 +411,5 @@ mod tests {
             .unwrap(); // F=2
         assert_eq!(config.high_threshold(), 5); // N-F = 7-2 = 5
         assert_eq!(config.low_threshold(), 3); // F+1 = 2+1 = 3
-        assert_eq!(config.aba_quorum_threshold(), 5); // N-F = 7-2 = 5
     }
 }
