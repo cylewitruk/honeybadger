@@ -47,33 +47,6 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct DummyCommonCoin;
-
-impl CommonCoin for DummyCommonCoin {
-    fn request_coin_value(
-        &mut self,
-        _epoch: EpochNum,
-        round: AbaRound,
-    ) -> (Option<CoinShare>, Option<bool>) {
-        (None, Some(round % 2 == 0)) // No shares to send, coin is immediately known
-    }
-
-    fn submit_coin_share(
-        &mut self,
-        _epoch: EpochNum,
-        _round: AbaRound,
-        _share_content: CoinShare,
-        _sender_id: NodeId,
-    ) -> Option<bool> {
-        None // Dummy coin doesn't process shares
-    }
-
-    fn get_coin_for_round_fallback(&mut self, _epoch: EpochNum, round: AbaRound) -> bool {
-        round % 2 == 0 // Fallback is the same predictable logic
-    }
-}
-
-#[derive(Debug)]
 pub struct BinaryByzantineAgreement {
     config: Arc<HoneyBadgerConfig>,
     batch_proposer_id: NodeId, // The proposer of the batch this ABA is about
@@ -647,6 +620,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::dummy::DummyCommonCoin;
     use crate::testing::create_test_config;
 
     const BATCH_PROPOSER_ID: NodeId = 0;

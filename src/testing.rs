@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::aba::{CommonCoin, DummyCommonCoin};
+use crate::aba::CommonCoin;
 use crate::config::{CoinFactory, HoneyBadgerConfig, HoneyBadgerConfigBuilder};
+use crate::dummy::DummyCommonCoin;
 use crate::types::NodeId;
 
 /// Creates a default `HoneyBadgerConfig` for testing purposes.

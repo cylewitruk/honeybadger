@@ -5,6 +5,9 @@ mod hbbft;
 mod rbc;
 mod types;
 
+#[cfg(any(test, feature = "dummy"))]
+pub mod dummy;
+
 #[cfg(test)]
 mod testing;
 

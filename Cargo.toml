@@ -3,6 +3,9 @@ name = "honeybadger"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+dummy = []
+
 [dependencies]
-serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 sha2 = { version = "0.10.9", default-features = false }
