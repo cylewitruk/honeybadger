@@ -3,8 +3,24 @@
 use std::collections::HashSet;
 
 use honeybadger::testing::{DEFAULT_EPOCH, TestHarness};
-use honeybadger::{Batch, EpochNum, NodeId, TimerExpiry, Transaction}; // Added Batch and Transaction // For comparing sets of decided batches
+use honeybadger::{Batch, EpochNum, NodeId, TimerExpiry, Transaction};
 
+/// ## Purpose/Intent
+///
+/// Verifies the basic "happy path" functionality of the HoneyBadgerBFT protocol
+/// for a single epoch where only one node proposes a batch of transactions.
+/// It ensures that all participating nodes can agree on and finalize the batch
+/// proposed by that single node.
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes using the default
+///    `MockInteractiveCoin`.
+/// 2. Node 0 is designated as the sole proposer for `epoch_to_test` (default
+///    epoch 0).
+/// 3. Node 0 proposes a batch containing two transactions.
+/// 4. The simulation runs steps (`harness.step()`) until all nodes have decided
+///    on `epoch_to_test`.
 #[test]
 fn happy_path_single_proposer_epoch() {
     let num_nodes = 4;
@@ -94,6 +110,22 @@ fn happy_path_single_proposer_epoch() {
     }
 }
 
+/// ## Purpose/Intent
+///
+/// Tests the "happy path" scenario where all `N` nodes in the network propose
+/// a batch in the same epoch. It verifies that all nodes correctly decide on
+/// the same set of `N` batches.
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes using `MockInteractiveCoin`.
+/// 2. Each of the 4 nodes proposes a unique batch for `epoch_to_test` (default
+///    epoch 0). Each batch contains a single, unique transaction derived from
+///    the proposer's ID.
+/// 3. An `expected_decided_batches_set` is maintained to track the expected
+///    final agreed-upon set.
+/// 4. The simulation runs until all nodes have decided the epoch and each has
+///    finalized `N` batches.
 #[test]
 fn happy_path_all_n_nodes_propose() {
     let num_nodes = 4;
@@ -198,6 +230,27 @@ fn happy_path_all_n_nodes_propose() {
     println!("Epoch 1 successfully finalized by all nodes.");
 }
 
+/// ## Purpose/Intent
+///
+/// Verifies that the state pruning mechanism in `HoneyBadgerBft` correctly
+/// discards state for old, finalized epochs according to the
+/// `epochs_to_retain_state` configuration.
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes. The configuration for each node
+///    is modified to set `epochs_to_retain_state` to 2 and uses
+///    `DummyCommonCoin`.
+/// 2. The simulation runs for `num_epochs_to_run = epochs_to_retain + 3` (i.e.,
+///    5 epochs).
+/// 3. In each epoch, every node proposes an empty batch to ensure activity and
+///    state generation.
+/// 4. The test waits for each epoch to be finalized by all nodes.
+///
+/// ## Important Details/Limitations
+///
+/// - Relies on test-only helper methods in `HoneyBadgerBft` to inspect internal
+///   state sizes.
 #[test]
 fn state_pruning_works() {
     let num_nodes = 4;
@@ -338,6 +391,23 @@ fn state_pruning_works() {
     );
 }
 
+/// ## Purpose/Intent
+///
+/// Tests the system's ability to tolerate `F` crash faults. It verifies that
+/// the remaining `N-F` correct nodes can still make progress, propose batches,
+/// and finalize epochs.
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes (N=4, so F=1) using
+///    `MockInteractiveCoin`.
+/// 2. **Epoch 0 (All Honest):** All 4 nodes propose unique batches, and the
+///    epoch is finalized to ensure a synchronized starting state.
+/// 3. **Crash Nodes:** `F` (1) node (node 0) is marked as crashed.
+/// 4. **Epoch 1 (F Crashed Nodes):** The remaining `N-F` (3) correct nodes
+///    submit unique transactions and then propose for epoch 1.
+/// 5. The simulation runs, expecting timeouts related to the crashed node.
+///    Correct nodes should finalize epoch 1 with `N-F` batches.
 #[test]
 fn fault_tolerance_f_crashed_nodes() {
     let num_nodes = 4;
@@ -527,6 +597,35 @@ fn fault_tolerance_f_crashed_nodes() {
     );
 }
 
+/// ## Purpose/Intent
+///
+/// Tests how the system handles a byzantine proposer that equivocates by
+/// sending two different `VAL` messages for its Reliable Broadcast (RBC)
+/// instance in an epoch. It verifies that honest nodes can still reach a
+/// consistent agreement.
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes, configured to use
+///    `DummyCommonCoin`.
+/// 2. `equivocating_proposer_id` (node 0) is designated.
+/// 3. Two different `VAL` messages (`val_message_v1` with `batch_v1`, and
+///    `val_message_v2` with `batch_v2`) are crafted for node 0 and injected
+///    into the network queue.
+/// 4. Honest nodes (1, 2, 3) propose their unique batches.
+/// 5. The equivocating node (node 0) also makes a "normal" (empty) proposal via
+///    `propose_on_node` to initialize its internal HBBFT state for the epoch.
+/// 6. The simulation runs.
+///
+/// ## Important Details/Limitations
+///
+/// - Due to the `TestHarness`'s global queue, honest nodes process
+///   `val_message_v1` first, causing their RBCs for proposer 0 to latch onto
+///   `batch_v1`.
+/// - Honest nodes are expected to decide `N` batches (including `batch_v1` from
+///   the equivocator).
+/// - The equivocator itself is expected to decide `N-1` batches (excluding its
+///   own, as its internal RBC for its empty proposal times out).
 #[test]
 fn rbc_proposer_equivocation() {
     let num_nodes = 4;
@@ -677,6 +776,33 @@ fn rbc_proposer_equivocation() {
     );
 }
 
+/// ## Purpose/Intent
+///
+/// Tests the system's resilience to a byzantine node equivocating within an
+/// Asynchronous Binary Agreement (ABA) instance by sending conflicting `EST`
+/// messages for the same round. It verifies that all nodes still reach a
+/// consistent decision for the epoch.
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes, using `DummyCommonCoin`.
+/// 2. `target_proposer_for_aba` (node 1) proposes a batch. Other nodes propose
+///    empty batches. This setup ensures an ABA instance for node 1's proposal
+///    is initiated on all nodes, likely starting with `EST(true,0)`.
+/// 3. The simulation runs for a few steps to allow RBCs for node 1 to deliver
+///    and ABAs to start.
+/// 4. `equivocating_node_id` (node 0) then injects a conflicting `EST(false,0)`
+///    message for the ABA instance related to `target_proposer_for_aba`'s
+///    batch.
+/// 5. The simulation runs to completion.
+///
+/// ## Important Details/Limitations
+///
+/// - The ABA implementation in `src/aba.rs` stores `EST` values such that a
+///   later `EST` from the same sender for the same round overwrites the earlier
+///   one.
+/// - The test asserts that all nodes (including the equivocator) agree on the
+///   *exact same set* of `N` (4) batches.
 #[test]
 fn aba_est_equivocation() {
     let num_nodes = 4;
@@ -834,6 +960,24 @@ fn aba_est_equivocation() {
     );
 }
 
+/// ## Purpose/Intent
+///
+/// Verifies that if a designated proposer remains silent (does not send a `VAL`
+/// message for its RBC), other nodes will correctly time out waiting for its
+/// RBC, initiate ABA for that proposer with a `false` value, and ultimately
+/// finalize the epoch by excluding the silent proposer's batch.
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes using `MockInteractiveCoin`.
+/// 2. `silent_proposer_id` (node 0) does not make any proposal.
+/// 3. Other nodes (1, 2, 3) call `prepare_and_propose_on_node` for the test
+///    epoch, which means they will propose empty batches and also expect a
+///    proposal from node 0.
+/// 4. The test checks that `SetRbcTimeout` timer requests are generated for the
+///    `silent_proposer_id`.
+/// 5. The simulation runs until the epoch is finalized.
+/// 6. Asserts that `N-1` batches are decided, excluding the silent proposer's.
 #[test]
 fn rbc_timeout_proposer_silent() {
     let num_nodes = 4;
@@ -965,6 +1109,27 @@ fn rbc_timeout_proposer_silent() {
     );
 }
 
+/// ## Purpose/Intent
+///
+/// Tests the ABA round timeout mechanism and recovery using the common coin.
+/// It simulates a scenario where an ABA round stalls due to message loss,
+/// forcing a timeout, and then verifies that the ABA progresses to the next
+/// round using the coin's output and eventually contributes to epoch
+/// finalization.
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes, configured to use
+///    `DummyCommonCoin`.
+/// 2. `proposer_id` (node 0) proposes a batch.
+/// 3. **Phase 1:** The simulation runs until an ABA round 0 timer for
+///    `proposer_id`'s batch is set. This phase also ensures RBC for
+///    `proposer_id` has likely delivered to all nodes.
+/// 4. **Phase 2:** The network queue is cleared to simulate message loss,
+///    ensuring the ABA round 0 timer will expire.
+/// 5. **Phase 3:** The simulation runs until the epoch finalizes. Currently,
+///    the epoch finalizes in Phase 1 before the timeout is induced for the
+///    primary ABA instance.
 #[test]
 fn aba_round_timeout_and_recovery() {
     let num_nodes = 4;
@@ -1099,6 +1264,25 @@ fn aba_round_timeout_and_recovery() {
     println!("ABA Timeout Test: Epoch {epoch_to_test} finalized successfully after ABA timeout.");
 }
 
+/// ## Purpose/Intent
+///
+/// Verifies the end-to-end flow of submitting transactions to a node, having
+/// that node propose them in a batch, and then all nodes agreeing on that batch
+/// (along with other nodes' empty batches for that epoch).
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes using `MockInteractiveCoin`.
+/// 2. **Epoch 0 (Sync):** An initial epoch is run with an empty proposal to
+///    synchronize nodes and advance them past the default epoch.
+/// 3. **Submit Transactions for Epoch 1:** Two transactions (`tx_a`, `tx_b`)
+///    are submitted to `node_receiving_txs` (node 0).
+/// 4. **Epoch 1 Proposals:**
+///    - `node_receiving_txs` calls `prepare_and_propose_on_node` for epoch 1,
+///      which should include `tx_a` and `tx_b` in its batch.
+///    - Other nodes also call `prepare_and_propose_on_node` for epoch 1,
+///      proposing empty batches.
+/// 5. The simulation runs until epoch 1 is finalized.
 #[test]
 fn happy_path_transaction_flow() {
     let num_nodes = 4;
@@ -1247,6 +1431,21 @@ fn happy_path_transaction_flow() {
     println!("Epoch 1 (transaction flow) successfully finalized by all nodes.");
 }
 
+/// ## Purpose/Intent
+///
+/// Tests the system's ability to correctly advance through multiple epochs,
+/// with proposals in each, and ensure agreement in each epoch. It also
+/// implicitly tests the automated epoch advancement logic.
+///
+/// ## Scenario Details
+///
+/// 1. Initializes a `TestHarness` with 4 nodes using `MockInteractiveCoin`.
+/// 2. **Epoch 0:** `proposer_id_e0` (node 0) proposes a batch with one
+///    transaction. The simulation runs until epoch 0 is finalized.
+/// 3. **Epoch 1:** After epoch 0 finalizes, all nodes should have advanced
+///    their `current_epoch` to 1. Each node is then explicitly instructed to
+///    `prepare_and_propose_on_node` for epoch 1 (they will propose empty
+///    batches). The simulation runs until epoch 1 is finalized.
 #[test]
 fn happy_path_multiple_epochs() {
     let num_nodes = 4;
