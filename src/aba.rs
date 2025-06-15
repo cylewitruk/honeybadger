@@ -1,4 +1,8 @@
-// This content is intended for src/aba.rs
+//! Implements the Asynchronous Binary Byzantine Agreement (ABA) sub-protocol.
+//!
+//! ABA is a core component of HoneyBadgerBFT, used to allow nodes to agree on
+//! whether to include a specific proposer's batch in the output for an epoch.
+//! Each potential proposer in an epoch has a corresponding ABA instance.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -10,8 +14,11 @@ use crate::types::{
     TimerRequest,
 };
 
-// Placeholder for a common coin implementation.
-// In a real system, this would involve threshold signatures.
+/// Defines the interface for a common coin mechanism used by ABA.
+///
+/// The common coin provides a source of shared randomness that helps ABA
+/// instances converge, especially when there's contention or byzantine
+/// behavior.
 pub trait CommonCoin: std::fmt::Debug + Send + Sync {
     /// Called by ABA when it needs a coin for a specific epoch and round,
     /// typically when a round cannot decide based on EST/AUX messages alone.
@@ -22,12 +29,26 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
     /// 2. Indicate if the coin can be determined *now* based on internal state
     ///    or this call.
     ///
-    /// It does NOT block.
+    /// ## Arguments
+    ///
+    /// * `epoch`: The epoch number for which the coin is requested.
+    /// * `round`: The ABA round number for which the coin is requested.
+    ///
+    /// ## Returns
+    ///
+    /// A tuple containing:
+    /// * `Option<CoinShare>`: The node's own share to be broadcast, if
+    ///   applicable.
+    /// * `Option<bool>`: The coin value if it can be determined immediately.
+    ///
+    /// ## Notes
+    ///
+    /// - This method should not block.
     fn request_coin_value(
         &mut self,
         epoch: EpochNum,
         round: AbaRound,
-    ) -> (Option<CoinShare>, Option<bool>); // (Option<own_share_to_broadcast>, Option<coin_value_if_known_now>)
+    ) -> (Option<CoinShare>, Option<bool>);
 
     /// Called by ABA to pass a received coin share message.
     /// Returns the coin value if this share (and others previously received)
@@ -36,34 +57,64 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
         &mut self,
         epoch: EpochNum,
         round: AbaRound,
-        share_content: CoinShare,
-        sender_id: NodeId, // ID of the node that sent this share
-    ) -> Option<bool>; // Option<coin_value_if_decided_now>
+        share_content: CoinShare, // The content of the received coin share.
+        sender_id: NodeId,        // ID of the node that sent this share.
+    ) -> Option<bool>;
 
     /// Called when an ABA round has timed out and a coin value is mandatorily
     /// needed to proceed to the next round. This method *must* return a
     /// boolean.
+    ///
+    /// ## Arguments
+    ///
+    /// * `epoch`: The epoch number of the timed-out ABA round.
+    /// * `round`: The ABA round number that timed out.
+    ///
+    /// ## Returns
+    ///
+    /// A `bool` representing the determined coin value for the round.
     fn get_coin_for_round_fallback(&mut self, epoch: EpochNum, round: AbaRound) -> bool;
 }
 
+/// Represents the state of a single Asynchronous Binary Byzantine Agreement
+/// instance.
+///
+/// Each instance is responsible for agreeing on a single boolean value. In the
+/// context of HoneyBadgerBFT, this value typically signifies whether a specific
+/// proposer's batch (identified by `batch_proposer_id` and `epoch`) should be
+/// included.
 #[derive(Debug)]
 pub struct BinaryByzantineAgreement {
+    /// Shared configuration for the HoneyBadgerBFT instance.
     config: Arc<HoneyBadgerConfig>,
-    batch_proposer_id: NodeId, // The proposer of the batch this ABA is about
+    /// The ID of the node whose proposed batch this ABA instance is for.
+    batch_proposer_id: NodeId,
+    /// The epoch number this ABA instance belongs to.
     epoch: EpochNum,
+    /// The ID of the node running this ABA instance.
     own_id: NodeId,
-    coin: Box<dyn CommonCoin>, // Using a trait object for the common coin
+    /// The common coin mechanism used by this ABA instance.
+    coin: Box<dyn CommonCoin>,
 
+    /// The current round number of this ABA instance.
     current_round: AbaRound,
-    current_estimate: Option<bool>, // Our estimate for the current_round, used to send EST
+    /// This node's current estimate for the `current_round`, used to send `EST`
+    /// messages.
+    current_estimate: Option<bool>,
 
-    // Received messages, per round:
-    // Round -> (Sender -> Value)
+    /// Stores received `EST` messages.
+    /// Mapping: `AbaRound` -> (`NodeId` (sender) -> `bool` (estimated value)).
     est_values: HashMap<AbaRound, HashMap<NodeId, bool>>,
+    /// Stores received `AUX` messages.
+    /// Mapping: `AbaRound` -> (`NodeId` (sender) -> `bool` (auxiliary value)).
     aux_values: HashMap<AbaRound, HashMap<NodeId, bool>>,
 
     // For each round, have we broadcasted EST / AUX for it?
+    /// Tracks whether an `EST` message has been sent for a given round.
+    /// Mapping: `AbaRound` -> `bool` (true if sent).
     sent_est: HashMap<AbaRound, bool>,
+    /// Tracks whether an `AUX` message has been sent for a given round.
+    /// Mapping: `AbaRound` -> `bool` (true if sent).
     sent_aux: HashMap<AbaRound, bool>,
 
     decided_value: Option<bool>,
@@ -73,6 +124,19 @@ pub struct BinaryByzantineAgreement {
 }
 
 impl BinaryByzantineAgreement {
+    /// Creates a new `BinaryByzantineAgreement` instance.
+    ///
+    /// ## Arguments
+    ///
+    /// * `config`: Shared configuration for the HoneyBadgerBFT instance.
+    /// * `batch_proposer_id`: The ID of the node whose proposed batch this ABA
+    ///   instance is for.
+    /// * `epoch`: The epoch number this ABA instance belongs to.
+    /// * `own_id`: The ID of the node running this ABA instance.
+    /// * `coin`: A boxed `CommonCoin` trait object to be used by this instance.
+    ///
+    /// ## Returns
+    /// A new `BinaryByzantineAgreement` instance.
     pub fn new(
         config: Arc<HoneyBadgerConfig>,
         batch_proposer_id: NodeId,
@@ -101,7 +165,19 @@ impl BinaryByzantineAgreement {
     /// Starts the ABA process with an initial value `v`.
     /// This is typically called after the corresponding RBC has delivered.
     /// The `initial_value` is `true` if RBC delivered, `false` otherwise (or if
-    /// timed out waiting for RBC).
+    /// timed out waiting for RBC). It sends an initial `EST` message and
+    /// requests a timer for round 0.
+    ///
+    /// ## Arguments
+    ///
+    /// * `initial_value`: The boolean value to propose for this ABA instance.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(AbaProcessOutput)`: Contains messages to send (an `EST` message)
+    ///   and a timer request.
+    /// * `Err(HbbftError)`: If an error occurs (though currently this path
+    ///   always returns `Ok`).
     pub fn propose(&mut self, initial_value: bool) -> Result<AbaProcessOutput, HbbftError> {
         if self.current_round != 0 || self.sent_est.contains_key(&0) {
             return Ok(AbaProcessOutput::default()); // Already proposed or past round 0
@@ -134,6 +210,19 @@ impl BinaryByzantineAgreement {
     }
 
     /// Handles an incoming ABA message for this instance.
+    ///
+    /// It processes `EST`, `AUX`, or `COIN` messages, updates internal state,
+    /// and potentially triggers sending new messages or advancing rounds.
+    ///
+    /// ## Arguments
+    ///
+    /// * `message`: The `AbaMessage` to handle.
+    ///
+    /// ## Returns
+    /// * `Ok(AbaProcessOutput)`: Contains any messages to send or timer
+    ///   requests generated.
+    /// * `Err(HbbftError)`: If the message is for a mismatched epoch or
+    ///   proposer.
     pub fn handle_message(&mut self, message: &AbaMessage) -> Result<AbaProcessOutput, HbbftError> {
         if message.pub_batch_proposer_id != self.batch_proposer_id
             || message.pub_epoch != self.epoch
@@ -149,16 +238,6 @@ impl BinaryByzantineAgreement {
 
         let sender_id = message.pub_sender_id;
         let mut output = AbaProcessOutput::default();
-
-        // Basic ABA logic (greatly simplified, based on common patterns like
-        // Mosteiro-Cao): This needs to be fleshed out with the specific ABA
-        // protocol steps. Key idea:
-        // 1. Exchange EST(v) for round r.
-        // 2. If N-F EST(v) received, broadcast AUX(v). Update estimate.
-        // 3. If N-F AUX(v) received, form a CONF set.
-        // 4. If CONF set is singleton {v}, decide v.
-        // 5. Else, use common coin and proceed to next round with new estimate based on
-        //    coin.
 
         match &message.pub_content {
             // Added early return for old rounds if decided.
@@ -258,8 +337,16 @@ impl BinaryByzantineAgreement {
 
     /// Checks if enough EST messages for a value `v` in `round` have been
     /// received to broadcast an AUX(v) message for that round.
-    /// Returns messages to send (AUX) and potentially timer requests if a new
-    /// round is started.
+    ///
+    /// ## Arguments
+    ///
+    /// * `round`: The ABA round number to check.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(AbaProcessOutput)`: Contains an `AUX` message if conditions are
+    ///   met.
+    /// * `Err(HbbftError)`: Currently, this path does not return errors.
     fn try_send_aux(&mut self, round: AbaRound) -> Result<AbaProcessOutput, HbbftError> {
         let mut output = AbaProcessOutput::default();
         if self
@@ -306,7 +393,18 @@ impl BinaryByzantineAgreement {
     /// Checks if enough AUX messages for `round` have been received to form a
     /// CONF set. If CONF set is singleton {v}, decide v.
     /// Else if CONF set is non-empty (or other conditions met), consult coin
-    /// and advance.
+    /// and potentially advance the round.
+    ///
+    /// ## Arguments
+    ///
+    /// * `round`: The ABA round number to check.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(AbaProcessOutput)`: Contains messages to send (e.g., `COIN` or
+    ///   `EST` for next round) and potentially a timer request if a new round
+    ///   is started.
+    /// * `Err(HbbftError)`: Currently, this path does not return errors.
     fn try_decide_or_advance_round(
         &mut self,
         round: AbaRound,
@@ -408,6 +506,17 @@ impl BinaryByzantineAgreement {
     /// Handles a timeout for a specific ABA round.
     /// If the timeout is for the current, undecided round, it consults the coin
     /// and starts the next round.
+    ///
+    /// ## Arguments
+    ///
+    /// * `round_that_timed_out`: The ABA round number that timed out.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(AbaProcessOutput)`: Contains messages and timer requests if a new
+    ///   round is started. Returns a default empty output if the instance is
+    ///   already decided or the timeout is not for the current round.
+    /// * `Err(HbbftError)`: If an error occurs while starting the next round.
     pub fn handle_round_timeout(
         &mut self,
         round_that_timed_out: AbaRound,
@@ -428,6 +537,23 @@ impl BinaryByzantineAgreement {
         self.start_next_round(Some(coin_val))
     }
 
+    /// Advances the ABA instance to the next round.
+    ///
+    /// This involves incrementing the round counter, setting the new estimate
+    /// based on the provided `proposed_value_for_next_round` (typically
+    /// from a coin flip), sending an `EST` message for the new round, and
+    /// requesting a timer. It also processes any messages that might have
+    /// been queued for this new round.
+    ///
+    /// ## Arguments
+    ///
+    /// * `proposed_value_for_next_round`: The boolean value to propose as the
+    ///   estimate for the new round.
+    ///
+    /// ## Returns
+    /// * `Ok(AbaProcessOutput)`: Contains messages and timer requests for the
+    ///   new round.
+    /// * `Err(HbbftError)`: If `proposed_value_for_next_round` is `None`.
     fn start_next_round(
         &mut self,
         proposed_value_for_next_round: Option<bool>,
@@ -520,6 +646,12 @@ impl BinaryByzantineAgreement {
         })
     }
 
+    /// Prunes stored `EST` and `AUX` messages for rounds strictly before
+    /// `current_valid_round`.
+    ///
+    /// ## Arguments
+    ///
+    /// * `current_valid_round`: The oldest round for which data should be kept.
     fn prune_past_round_data(&mut self, current_valid_round: AbaRound) {
         self.est_values
             .retain(|&r, _| r >= current_valid_round);
@@ -529,6 +661,14 @@ impl BinaryByzantineAgreement {
 
     /// Helper to process ESTs and AUXs that might have been queued for the
     /// current round. This is called when a round starts.
+    ///
+    /// It attempts to send `AUX` messages based on current `EST`s and then
+    /// attempts to decide or advance the round based on current `AUX`s.
+    ///
+    /// ## Returns
+    /// * `Ok(AbaProcessOutput)`: Contains any messages or timer requests
+    ///   generated from processing queued items.
+    /// * `Err(HbbftError)`: If an error occurs during processing.
     fn process_potential_progress_for_current_round(
         &mut self,
     ) -> Result<AbaProcessOutput, HbbftError> {
@@ -563,16 +703,20 @@ impl BinaryByzantineAgreement {
     }
 
     /// Returns the decided value if this ABA instance has terminated.
+    ///
+    /// ## Returns
+    /// `Some(bool)` if decided, `None` otherwise.
     pub fn output(&self) -> Option<bool> {
         self.decided_value
     }
 
+    /// Checks if this ABA instance has reached a decision.
     pub fn is_decided(&self) -> bool {
         self.decided_value.is_some()
     }
 
     /// Returns the current round number of this ABA instance (for
-    /// debugging/checks).
+    /// debugging or internal checks).
     pub fn current_round_debug(&self) -> AbaRound {
         self.current_round
     }
