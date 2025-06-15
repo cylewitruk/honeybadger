@@ -369,12 +369,21 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::HoneyBadgerConfig;
+    // Import necessary items for creating a dummy CoinFactory
+    use crate::aba::{CommonCoin, DummyCommonCoin};
+    use crate::config::{CoinFactory, HoneyBadgerConfig};
     use crate::types::Batch;
 
     fn create_config(n: usize, f: usize, own_id: NodeId) -> Arc<HoneyBadgerConfig> {
         let all_node_ids: BTreeSet<NodeId> = (0..n as NodeId).collect();
-        Arc::new(HoneyBadgerConfig::new(own_id, all_node_ids, f, 3, 1000, 2000).unwrap())
+        // Create a dummy coin factory for testing purposes
+        let dummy_coin_factory = CoinFactory::new(Arc::new(|_node_id, _epoch, _config| {
+            Box::new(DummyCommonCoin {}) as Box<dyn CommonCoin>
+        }));
+        Arc::new(
+            HoneyBadgerConfig::new(own_id, all_node_ids, f, 3, 1000, 2000, dummy_coin_factory)
+                .unwrap(),
+        )
     }
 
     fn create_batch(tx_content: u8) -> Batch {

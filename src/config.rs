@@ -1,9 +1,34 @@
 // This content is intended for src/config.rs
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use crate::EpochNum;
+use crate::aba::CommonCoin; // Import the CommonCoin trait
 use crate::types::NodeId;
+
+/// A factory function for creating CommonCoin instances.
+type ActualCoinFactoryFn =
+    dyn Fn(NodeId, EpochNum, Arc<HoneyBadgerConfig>) -> Box<dyn CommonCoin> + Send + Sync;
+
+/// Wrapper for the CoinFactory to allow HoneyBadgerConfig to derive Debug and Clone.
+pub struct CoinFactory(Arc<ActualCoinFactoryFn>);
+
+impl CoinFactory {
+    pub fn new(factory_fn: Arc<ActualCoinFactoryFn>) -> Self {
+        CoinFactory(factory_fn)
+    }
+
+    // Allows calling the wrapped factory
+    pub fn create_coin(
+        &self,
+        node_id: NodeId,
+        epoch_num: EpochNum,
+        config: Arc<HoneyBadgerConfig>,
+    ) -> Box<dyn CommonCoin> {
+        (self.0)(node_id, epoch_num, config)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct HoneyBadgerConfig {
@@ -21,6 +46,19 @@ pub struct HoneyBadgerConfig {
     pub epochs_to_retain_state: EpochNum,
     pub default_aba_round_timeout_ms: u64,
     pub default_rbc_instance_timeout_ms: u64,
+    pub coin_factory: CoinFactory,
+}
+
+impl Clone for CoinFactory {
+    fn clone(&self) -> Self {
+        CoinFactory(Arc::clone(&self.0))
+    }
+}
+
+impl std::fmt::Debug for CoinFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CoinFactory").field(&"<factory_fn>").finish()
+    }
 }
 
 impl HoneyBadgerConfig {
@@ -31,6 +69,7 @@ impl HoneyBadgerConfig {
         epochs_to_retain_state: EpochNum, // New parameter
         default_aba_round_timeout_ms: u64,
         default_rbc_instance_timeout_ms: u64,
+        coin_factory: CoinFactory,
     ) -> Result<Self, String> {
         let num_total_nodes = all_node_ids.len();
         if num_total_nodes == 0 {
@@ -68,6 +107,7 @@ impl HoneyBadgerConfig {
             epochs_to_retain_state,
             default_aba_round_timeout_ms,
             default_rbc_instance_timeout_ms,
+            coin_factory,
         })
     }
 
@@ -108,6 +148,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::aba::DummyCommonCoin;
     use crate::types::NodeId;
 
     fn create_node_ids(n: usize) -> BTreeSet<NodeId> {
@@ -117,7 +158,8 @@ mod tests {
     #[test]
     fn config_new_valid() {
         let all_ids = create_node_ids(4);
-        let config = HoneyBadgerConfig::new(0, all_ids, 1, 3, 1000, 2000);
+        let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
+        let config = HoneyBadgerConfig::new(0, all_ids, 1, 3, 1000, 2000, dummy_coin_factory);
         assert!(config.is_ok());
         let config = config.unwrap();
         assert_eq!(config.num_total_nodes, 4);
@@ -127,7 +169,8 @@ mod tests {
     #[test]
     fn config_new_n_zero() {
         let all_ids = create_node_ids(0);
-        let config = HoneyBadgerConfig::new(0, all_ids, 0, 3, 1000, 2000);
+        let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
+        let config = HoneyBadgerConfig::new(0, all_ids, 0, 3, 1000, 2000, dummy_coin_factory);
         assert!(config.is_err());
         assert_eq!(config.unwrap_err(), "Total number of nodes (N) cannot be zero.");
     }
@@ -135,21 +178,32 @@ mod tests {
     #[test]
     fn config_new_f_ge_n() {
         let all_ids = create_node_ids(3);
-        let config = HoneyBadgerConfig::new(0, all_ids.clone(), 3, 3, 1000, 2000); // F = N
+        let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
+        let config = HoneyBadgerConfig::new(
+            0,
+            all_ids.clone(),
+            3,
+            3,
+            1000,
+            2000,
+            dummy_coin_factory.clone(),
+        ); // F = N
         assert!(config.is_err());
         assert_eq!(
             config.unwrap_err(),
             "Number of faulty nodes (F) must be less than total nodes (N)."
         );
 
-        let config_f_gt_n = HoneyBadgerConfig::new(0, all_ids, 4, 3, 1000, 2000); // F > N
+        let config_f_gt_n =
+            HoneyBadgerConfig::new(0, all_ids, 4, 3, 1000, 2000, dummy_coin_factory); // F > N
         assert!(config_f_gt_n.is_err());
     }
 
     #[test]
     fn config_new_n_lt_3f_plus_1() {
         let all_ids = create_node_ids(3); // N=3
-        let config = HoneyBadgerConfig::new(0, all_ids, 1, 3, 1000, 2000); // F=1. N=3, 3F+1=4. N < 3F+1
+        let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
+        let config = HoneyBadgerConfig::new(0, all_ids, 1, 3, 1000, 2000, dummy_coin_factory); // F=1. N=3, 3F+1=4. N < 3F+1
         assert!(config.is_err());
         assert_eq!(
             config.unwrap_err(),
@@ -160,7 +214,8 @@ mod tests {
     #[test]
     fn config_new_own_id_not_in_all_ids() {
         let all_ids = create_node_ids(4);
-        let config = HoneyBadgerConfig::new(5, all_ids, 1, 3, 1000, 2000); // own_id 5 not in 0..3
+        let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
+        let config = HoneyBadgerConfig::new(5, all_ids, 1, 3, 1000, 2000, dummy_coin_factory); // own_id 5 not in 0..3
         assert!(config.is_err());
         assert_eq!(config.unwrap_err(), "Own ID 5 not found in the set of all node IDs.");
     }
@@ -168,7 +223,8 @@ mod tests {
     #[test]
     fn config_new_epochs_to_retain_state_zero() {
         let all_ids = create_node_ids(4);
-        let config = HoneyBadgerConfig::new(0, all_ids, 1, 0, 1000, 2000);
+        let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
+        let config = HoneyBadgerConfig::new(0, all_ids, 1, 0, 1000, 2000, dummy_coin_factory);
         assert!(config.is_err());
         assert_eq!(config.unwrap_err(), "epochs_to_retain_state must be at least 1.");
     }
@@ -176,25 +232,29 @@ mod tests {
     #[test]
     fn config_new_timeout_zero() {
         let all_ids = create_node_ids(4);
-        let config_aba_timeout = HoneyBadgerConfig::new(0, all_ids.clone(), 1, 3, 0, 2000);
+        let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
+        let config_aba_timeout =
+            HoneyBadgerConfig::new(0, all_ids.clone(), 1, 3, 0, 2000, dummy_coin_factory.clone());
         assert!(config_aba_timeout.is_err());
         assert_eq!(
             config_aba_timeout.unwrap_err(),
             "default_aba_round_timeout_ms must be greater than 0."
         );
 
-        let config_rbc_timeout = HoneyBadgerConfig::new(0, all_ids, 1, 3, 1000, 0);
+        let config_rbc_timeout =
+            HoneyBadgerConfig::new(0, all_ids, 1, 3, 1000, 0, dummy_coin_factory);
         assert!(config_rbc_timeout.is_err());
         assert_eq!(
             config_rbc_timeout.unwrap_err(),
             "default_rbc_instance_timeout_ms must be greater than 0."
         );
     }
-
     #[test]
     fn config_threshold_methods() {
         let all_ids = create_node_ids(7); // N=7
-        let config = HoneyBadgerConfig::new(0, all_ids, 2, 3, 1000, 2000).unwrap(); // F=2
+        let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
+        let config =
+            HoneyBadgerConfig::new(0, all_ids, 2, 3, 1000, 2000, dummy_coin_factory).unwrap(); // F=2
         assert_eq!(config.high_threshold(), 5); // N-F = 7-2 = 5
         assert_eq!(config.low_threshold(), 3); // F+1 = 2+1 = 3
         assert_eq!(config.aba_quorum_threshold(), 5); // N-F = 7-2 = 5

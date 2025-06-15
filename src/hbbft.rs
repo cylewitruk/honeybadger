@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::aba::{BinaryByzantineAgreement, DummyCommonCoin}; // Using DummyCommonCoin for now
+use crate::aba::BinaryByzantineAgreement;
 use crate::config::HoneyBadgerConfig;
 use crate::rbc::ReliableBroadcast;
 use crate::types::{
@@ -339,7 +339,11 @@ impl HoneyBadgerBft {
                 .map(|&node_id| {
                     // Each ABA instance gets its own common coin; for DummyCommonCoin it's cheap.
                     // For a real threshold coin, the setup might be more involved (sharing key).
-                    let coin = Box::new(DummyCommonCoin {});
+                    let coin = shared_config.coin_factory.create_coin(
+                        node_id, // batch_proposer_id for this ABA
+                        epoch_num,
+                        Arc::clone(&shared_config),
+                    );
                     let aba = BinaryByzantineAgreement::new(
                         Arc::clone(&shared_config),
                         node_id,

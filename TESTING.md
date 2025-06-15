@@ -8,116 +8,116 @@ This document outlines the testing plan for the `honeybadger` crate, focusing on
 
 #### `Batch` Struct & `Batch::new`
 
-- [ ] `Batch::new` correctly sorts transactions.
-- [ ] `Batch::new` handles an empty list of transactions.
-- [ ] `Batch::new` handles a single transaction.
-- [ ] `Batch::new` handles multiple transactions.
+- [x] `Batch::new` correctly sorts transactions.
+- [x] `Batch::new` handles an empty list of transactions.
+- [x] `Batch::new` handles a single transaction.
+- [x] `Batch::new` handles multiple transactions.
 
 #### `hash_batch` Function
 
-- [ ] `hash_batch` produces consistent hashes for identical batch content.
-- [ ] `hash_batch` produces different hashes for different batch content.
-- [ ] `hash_batch` produces the same hash regardless of initial transaction order (due to `Batch::new` sorting).
-- [ ] `hash_batch` correctly handles length prefixing to prevent ambiguities (e.g., `[[1,2],[3]]` vs. `[[1,2,3]]`).
+- [x] `hash_batch` produces consistent hashes for identical batch content.
+- [x] `hash_batch` produces different hashes for different batch content.
+- [x] `hash_batch` produces the same hash regardless of initial transaction order (due to `Batch::new` sorting).
+- [x] `hash_batch` correctly handles length prefixing to prevent ambiguities (e.g., `[[1,2],[3]]` vs. `[[1,2,3]]`).
 
 ### B. `src/config.rs` (`HoneyBadgerConfig`)
 
 #### `HoneyBadgerConfig::new` Validation
 
-- [ ] Test with a valid configuration.
-- [ ] Test `Err` return for `num_total_nodes = 0`.
-- [ ] Test `Err` return for `num_faulty_nodes >= num_total_nodes`.
-- [ ] Test `Err` return for `num_total_nodes < 3 * num_faulty_nodes + 1`.
-- [ ] Test `Err` return if `own_id` is not in `all_node_ids`.
-- [ ] Test `Err` return if `epochs_to_retain_state = 0`.
-- [ ] Test `Err` return if `default_aba_round_timeout_ms = 0`.
-- [ ] Test `Err` return if `default_rbc_instance_timeout_ms = 0`.
+- [x] Test with a valid configuration.
+- [x] Test `Err` return for `num_total_nodes = 0`.
+- [x] Test `Err` return for `num_faulty_nodes >= num_total_nodes`.
+- [x] Test `Err` return for `num_total_nodes < 3 * num_faulty_nodes + 1`.
+- [x] Test `Err` return if `own_id` is not in `all_node_ids`.
+- [x] Test `Err` return if `epochs_to_retain_state = 0`.
+- [x] Test `Err` return if `default_aba_round_timeout_ms = 0`.
+- [x] Test `Err` return if `default_rbc_instance_timeout_ms = 0`.
 
 #### Threshold Methods
 
-- [ ] Verify `high_threshold()` returns `N - F`.
-- [ ] Verify `low_threshold()` returns `F + 1`.
-- [ ] Verify `aba_quorum_threshold()` returns the expected value (currently `N - F`, ensure this aligns with ABA logic if it changes).
+- [x] Verify `high_threshold()` returns `N - F`.
+- [x] Verify `low_threshold()` returns `F + 1`.
+- [x] Verify `aba_quorum_threshold()` returns the expected value (currently `N - F`, ensure this aligns with ABA logic if it changes).
 
 ### C. `src/rbc.rs` (`ReliableBroadcast`)
 
 #### Proposer Behavior (`propose`)
 
-- [ ] `propose` returns `VAL` and `ECHO` messages correctly when called by the proposer.
-- [ ] `propose` returns an error if a non-proposer calls it.
-- [ ] `propose` handles being called multiple times by the proposer (effectively proposes only once).
+- [x] `propose` returns `VAL` and `ECHO` messages correctly when called by the proposer.
+- [x] `propose` returns an error if a non-proposer calls it.
+- [x] `propose` handles being called multiple times by the proposer (effectively proposes only once).
 
 #### Message Handling (`handle_message`)
 
 - **VAL Messages:**
-  - [ ] Correct node sends `ECHO` upon receiving a valid `VAL` from the proposer.
-  - [ ] Proposer equivocation (different `VAL` contents): instance sticks to the first `VAL`'s hash.
-  - [ ] `VAL` message from a non-proposer is rejected/errors.
+  - [x] Correct node sends `ECHO` upon receiving a valid `VAL` from the proposer.
+  - [x] Proposer equivocation (different `VAL` contents): instance sticks to the first `VAL`'s hash.
+  - [x] `VAL` message from a non-proposer is rejected/errors.
 
 - **ECHO Messages:**
-  - [ ] `ECHO` senders are correctly stored for the given hash.
-  - [ ] Node sends its own `ECHO` (relay condition) upon receiving `F+1` `ECHO`s for a known payload hash, if it hasn't echoed yet.
-  - [ ] Node sends `READY` upon receiving `N-F` `ECHO`s for a hash it has also sent `ECHO` for.
+  - [x] `ECHO` senders are correctly stored for the given hash.
+  - [x] Node sends its own `ECHO` (relay condition) upon receiving `F+1` `ECHO`s for a known payload hash, if it hasn't echoed yet.
+  - [x] Node sends `READY` upon receiving `N-F` `ECHO`s for a hash it has also sent `ECHO` for.
 - **READY Messages:**
-  - [ ] `READY` senders are correctly stored for the given hash.
-  - [ ] Node sends its own `READY` (relay condition) upon receiving `F+1` `READY`s for a hash it has also sent `ECHO` for, if it hasn't sent `READY` yet.
-  - [ ] Delivery condition: Node decides/accepts hash upon receiving `N-F` `READY`s for a hash it has the payload for and has processed (e.g., sent `ECHO` or `READY` for).
+  - [x] `READY` senders are correctly stored for the given hash.
+  - [x] Node sends its own `READY` (relay condition) upon receiving `F+1` `READY`s for a hash it has also sent `ECHO` for, if it hasn't sent `READY` yet.
+  - [x] Delivery condition: Node decides/accepts hash upon receiving `N-F` `READY`s for a hash it has the payload for and has processed (e.g., sent `ECHO` or `READY` for).
 
 #### State Transitions
 
-- [ ] `is_decided()` reflects the correct state after various message sequences leading to a decision.
-- [ ] `output()` returns the correct batch after a decision, and `None` otherwise or after first call.
+- [x] `is_decided()` reflects the correct state after various message sequences leading to a decision.
+- [x] `output()` returns the correct batch after a decision, and `None` otherwise or after first call.
 
 #### Idempotency
 
-- [ ] Processing the same valid message multiple times does not lead to incorrect state or duplicate outgoing messages.
+- [x] Processing the same valid message multiple times does not lead to incorrect state or duplicate outgoing messages.
 
 ### D. `src/aba.rs` (`BinaryByzantineAgreement` with `DummyCommonCoin`)
 
 #### `propose` Method
 
-- [ ] `propose` sends the initial `Est` message for round 0 with the correct value.
-- [ ] `propose` requests a timer for round 0 with the correct suggested duration.
+- [x] `propose` sends the initial `Est` message for round 0 with the correct value.
+- [x] `propose` requests a timer for round 0 with the correct suggested duration.
 
 #### Message Handling (`handle_message`)
 
 - **EST Messages:**
-  - [ ] `Est` values are correctly stored for the current round.
-  - [ ] Node sends `Aux` upon receiving `F+1` `Est`s for a value in the current round.
+  - [x] `Est` values are correctly stored for the current round.
+  - [x] Node sends `Aux` upon receiving `F+1` `Est`s for a value in the current round.
 
 - **AUX Messages:**
-  - [ ] `Aux` values are correctly stored for the current round.
+  - [x] `Aux` values are correctly stored for the current round.
   - [ ] Decision logic:
-    - [ ] Decides correctly if `N-F` `Aux` messages are received for a single value.
-    - [ ] If CONF set is ambiguous (e.g., `N-F` `Aux` for multiple values), verify it calls `coin.request_coin_value()`.
-    - [ ] With `DummyCommonCoin`, an ambiguous CONF set leads to an immediate coin value and starting the next round.
+    - [x] Decides correctly if `N-F` `Aux` messages are received for a single value.
+    - [x] If CONF set is ambiguous (e.g., `F+1` `Aux` for multiple values but no `N-F` for one), verify it calls `coin.request_coin_value()`. (This corresponds to your `aba_handle_aux_f_plus_one_support_leads_to_coin` test)
+    - [x] With `DummyCommonCoin`, an ambiguous CONF set (as defined above) leads to an immediate coin value and starting the next round.
 - **COIN Messages:**
-  - [ ] `Coin` messages are processed by calling `coin.submit_coin_share()`.
-  - [ ] With `DummyCommonCoin`, `submit_coin_share` returning `Some(value)` (though current dummy doesn't) should trigger `start_next_round`.
+  - [x] `Coin` messages are processed by calling `coin.submit_coin_share()`.
+  - [x] With `DummyCommonCoin`, `submit_coin_share` returning `Some(value)` (though current dummy doesn't, the logic path is there) should trigger `start_next_round`.
 
 #### Round Advancement (`start_next_round`)
 
-- [ ] `current_round` is correctly incremented.
-- [ ] A new `Est` message is generated for the new round using the coin's output.
-- [ ] A timer is requested for the new round with the correct suggested duration.
+- [x] `current_round` is correctly incremented.
+- [x] A new `Est` message is generated for the new round using the coin's output.
+- [x] A timer is requested for the new round with the correct suggested duration.
 
 #### Future Round Message Queuing
 
-- [ ] Send `Est` messages for `round > current_round`; verify they are stored but do not trigger immediate actions.
-- [ ] Send `Aux` messages for `round > current_round`; verify they are stored but do not trigger immediate actions.
-- [ ] Advance to a future round for which messages were queued.
-- [ ] Verify `start_next_round` (via `process_potential_progress_for_current_round`) correctly processes these queued `Est` and `Aux` messages.
+- [x] Send `Est` messages for `round > current_round`; verify they are stored but do not trigger immediate actions.
+- [x] Send `Aux` messages for `round > current_round`; verify they are stored but do not trigger immediate actions.
+- [x] Advance to a future round for which messages were queued.
+- [x] Verify `start_next_round` (via `process_potential_progress_for_current_round`) correctly processes these queued `Est` and `Aux` messages.
 
 #### Timeout Handling (`handle_round_timeout`)
 
-- [ ] `handle_round_timeout` calls `coin.get_coin_for_round_fallback()`.
-- [ ] `handle_round_timeout` starts the next round using the fallback coin value.
-- [ ] `handle_round_timeout` clears `waiting_for_coin_in_round`.
+- [x] `handle_round_timeout` calls `coin.get_coin_for_round_fallback()`.
+- [x] `handle_round_timeout` starts the next round using the fallback coin value.
+- [x] `handle_round_timeout` clears `waiting_for_coin_in_round`.
 
 #### State Transitions
 
-- [ ] `is_decided()` reflects the correct state after various sequences.
-- [ ] `output()` returns the correct boolean value after a decision.
+- [x] `is_decided()` reflects the correct state after various sequences.
+- [x] `output()` returns the correct boolean value after a decision.
 
 ## II. Integration Tests (`HoneyBadgerBft`)
 

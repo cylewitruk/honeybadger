@@ -8,7 +8,7 @@ mod types;
 // --- Public API Exports ---
 
 // Core state machine and configuration
-pub use config::HoneyBadgerConfig;
+pub use config::{CoinFactory, HoneyBadgerConfig}; // Added CoinFactory
 pub use hbbft::HoneyBadgerBft;
 // Message content types, public if users need to inspect message details
 pub use types::{AbaMessage, AbaMessageContent, RbcMessage, RbcMessageContent};
