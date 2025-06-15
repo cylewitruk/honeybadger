@@ -5,8 +5,11 @@ mod hbbft;
 mod rbc;
 mod types;
 
+#[cfg(test)]
+mod testing;
+
 // Core state machine and configuration
-pub use config::{CoinFactory, HoneyBadgerConfig};
+pub use config::{CoinFactory, HoneyBadgerConfig, HoneyBadgerConfigBuilder};
 pub use error::HbbftError;
 pub use hbbft::HoneyBadgerBft;
 // Message content types, public if users need to inspect message details

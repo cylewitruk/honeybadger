@@ -255,9 +255,11 @@ impl ReliableBroadcast {
                             || self.initial_echo_sent_for_hash == Some(*ready_hash)
                         {
                             self.accepted_hash = Some(*ready_hash);
-                            // DbgPrint!("[RBC ({},{})] DELIVERED hash {:?} with N-F READYs",
+                            // DbgPrint!("[RBC ({},{})] DELIVERED hash {:?} with
+                            // N-F READYs",
                             // self.proposer_id, self.epoch, ready_hash);
-                            // No message to send upon delivery, it's an internal state change.
+                            // No message to send upon delivery, it's an
+                            // internal state change.
                             // The output() method will be used to retrieve it.
                         } else {
                             // We have N-F READYs for a hash, but we never sent ECHO or READY for
@@ -284,7 +286,8 @@ impl ReliableBroadcast {
     }
 
     /// Helper to check and generate READY message if conditions met.
-    /// This is called after receiving VAL, ECHO, or processing our own proposal.
+    /// This is called after receiving VAL, ECHO, or processing our own
+    /// proposal.
     fn check_and_send_ready_if_conditions_met(
         &mut self,
         hash_to_check: BatchHash,
@@ -347,10 +350,10 @@ impl ReliableBroadcast {
                 self.accepted_batch_delivered = true;
                 return Some(batch.clone());
             } else {
-                // Should not happen if logic is correct: accepted a hash but don't have payload.
-                // This would be a critical bug or inconsistency.
-                // DbgPrint!("[RBC ({},{})] CRITICAL: Accepted hash {:?} but batch data not found!",
-                // self.proposer_id, self.epoch, hash);
+                // Should not happen if logic is correct: accepted a hash but don't have
+                // payload. This would be a critical bug or inconsistency.
+                // DbgPrint!("[RBC ({},{})] CRITICAL: Accepted hash {:?} but batch data not
+                // found!", self.proposer_id, self.epoch, hash);
                 return None;
             }
         }
@@ -364,26 +367,11 @@ impl ReliableBroadcast {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::*;
-    // Import necessary items for creating a dummy CoinFactory
-    use crate::aba::{CommonCoin, DummyCommonCoin};
-    use crate::config::{CoinFactory, HoneyBadgerConfig};
+    use crate::testing::create_test_config;
     use crate::types::Batch;
-
-    fn create_config(n: usize, f: usize, own_id: NodeId) -> Arc<HoneyBadgerConfig> {
-        let all_node_ids: BTreeSet<NodeId> = (0..n as NodeId).collect();
-        // Create a dummy coin factory for testing purposes
-        let dummy_coin_factory = CoinFactory::new(Arc::new(|_node_id, _epoch, _config| {
-            Box::new(DummyCommonCoin {}) as Box<dyn CommonCoin>
-        }));
-        Arc::new(
-            HoneyBadgerConfig::new(own_id, all_node_ids, f, 3, 1000, 2000, dummy_coin_factory)
-                .unwrap(),
-        )
-    }
 
     fn create_batch(tx_content: u8) -> Batch {
         Batch::new(vec![vec![tx_content]])
@@ -394,7 +382,7 @@ mod tests {
 
     #[test]
     fn rbc_propose_by_proposer() {
-        let config = create_config(4, 1, PROPOSER_ID);
+        let config = create_test_config(4, 1, PROPOSER_ID);
         let mut rbc =
             ReliableBroadcast::new(Arc::clone(&config), PROPOSER_ID, EPOCH_NUM, PROPOSER_ID);
         let batch = create_batch(1);
@@ -409,7 +397,7 @@ mod tests {
 
     #[test]
     fn rbc_propose_by_non_proposer() {
-        let config = create_config(4, 1, 1); // own_id = 1, proposer_id = 0
+        let config = create_test_config(4, 1, 1); // own_id = 1, proposer_id = 0
         let mut rbc = ReliableBroadcast::new(Arc::clone(&config), PROPOSER_ID, EPOCH_NUM, 1);
         let batch = create_batch(1);
         let result = rbc.propose(batch);
@@ -418,7 +406,7 @@ mod tests {
 
     #[test]
     fn rbc_propose_multiple_times() {
-        let config = create_config(4, 1, PROPOSER_ID);
+        let config = create_test_config(4, 1, PROPOSER_ID);
         let mut rbc =
             ReliableBroadcast::new(Arc::clone(&config), PROPOSER_ID, EPOCH_NUM, PROPOSER_ID);
         let batch1 = create_batch(1);
@@ -434,7 +422,7 @@ mod tests {
 
     #[test]
     fn rbc_handle_val_from_proposer() {
-        let config = create_config(4, 1, 1); // own_id = 1
+        let config = create_test_config(4, 1, 1); // own_id = 1
         let mut rbc_node1 = ReliableBroadcast::new(Arc::clone(&config), PROPOSER_ID, EPOCH_NUM, 1);
         let batch = create_batch(1);
         let val_message = RbcMessage {
@@ -455,7 +443,7 @@ mod tests {
 
     #[test]
     fn rbc_handle_val_equivocation() {
-        let config = create_config(4, 1, 1);
+        let config = create_test_config(4, 1, 1);
         let mut rbc_node1 = ReliableBroadcast::new(Arc::clone(&config), PROPOSER_ID, EPOCH_NUM, 1);
         let batch1 = create_batch(1);
         let batch2 = create_batch(2);
@@ -483,7 +471,7 @@ mod tests {
 
     #[test]
     fn rbc_handle_val_from_non_proposer() {
-        let config = create_config(4, 1, 1);
+        let config = create_test_config(4, 1, 1);
         let mut rbc_node1 = ReliableBroadcast::new(Arc::clone(&config), PROPOSER_ID, EPOCH_NUM, 1);
         let batch = create_batch(1);
         let val_message = RbcMessage {
@@ -499,14 +487,14 @@ mod tests {
     fn rbc_echo_relay_and_ready_sending() {
         let n = 4;
         let f = 1;
-        let config_node0 = create_config(n, f, 0); // Proposer
+        let config_node0 = create_test_config(n, f, 0); // Proposer
         let mut rbc_node0 = ReliableBroadcast::new(Arc::clone(&config_node0), 0, EPOCH_NUM, 0);
         let batch = create_batch(10);
         let batch_hash = hash_batch(&batch);
         let _ = rbc_node0.propose(batch.clone()); // Node 0 proposes and sends its own VAL, ECHO
 
         // Simulate other nodes receiving VAL and sending ECHO
-        let mut rbc_node1 = ReliableBroadcast::new(create_config(n, f, 1), 0, EPOCH_NUM, 1);
+        let mut rbc_node1 = ReliableBroadcast::new(create_test_config(n, f, 1), 0, EPOCH_NUM, 1);
         let val_msg_from_0 = RbcMessage {
             pub_proposer_id: 0,
             pub_epoch: EPOCH_NUM,
@@ -539,7 +527,7 @@ mod tests {
         assert!(responses_node1_after_echo0.is_empty());
 
         // Simulate Node 2 sending ECHO
-        let mut rbc_node2 = ReliableBroadcast::new(create_config(n, f, 2), 0, EPOCH_NUM, 2);
+        let mut rbc_node2 = ReliableBroadcast::new(create_test_config(n, f, 2), 0, EPOCH_NUM, 2);
         let echo2_responses = rbc_node2.handle_message(&val_msg_from_0).unwrap();
         let echo_msg_from_2 = echo2_responses
             .into_iter()
@@ -569,7 +557,7 @@ mod tests {
 
         // Simulate Node 2 sending READY (after it got N-F ECHOs)
         let mut rbc_node2_ready_state =
-            ReliableBroadcast::new(create_config(n, f, 2), 0, EPOCH_NUM, 2);
+            ReliableBroadcast::new(create_test_config(n, f, 2), 0, EPOCH_NUM, 2);
         rbc_node2_ready_state
             .handle_message(&val_msg_from_0)
             .unwrap(); // VAL
@@ -598,7 +586,7 @@ mod tests {
 
     #[test]
     fn rbc_idempotency() {
-        let config = create_config(4, 1, 1);
+        let config = create_test_config(4, 1, 1);
         let mut rbc = ReliableBroadcast::new(Arc::clone(&config), PROPOSER_ID, EPOCH_NUM, 1);
         let batch = create_batch(1);
         let val_message = RbcMessage {

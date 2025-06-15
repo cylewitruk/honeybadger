@@ -8,7 +8,7 @@ use_small_heuristics = "Max"
 max_width = 100
 
 # Comment width
-comment_width = 120
+comment_width = 80
 
 # Reorder import statements alphabetically
 reorder_imports = true
@@ -47,3 +47,5 @@ format_strings = true
 
 # Force chained method calls to be wrapped more aggressively.
 chain_width = 60
+
+struct_lit_width = 30

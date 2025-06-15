@@ -22,7 +22,8 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// Creates a new Batch. Transactions will be sorted internally for canonical representation.
+    /// Creates a new Batch. Transactions will be sorted internally for
+    /// canonical representation.
     pub fn new(mut transactions: Vec<Transaction>) -> Self {
         transactions.sort(); // Ensure canonical order for hashing
         Batch { transactions }
@@ -33,13 +34,15 @@ pub type BatchHash = [u8; 32]; // e.g., SHA-256 hash
 
 /// Computes the SHA256 hash of a batch.
 /// Relies on the `transactions` field within Batch being in a canonical order.
-/// (e.g., sorted lexicographically). The `Batch::new` constructor can enforce this.
+/// (e.g., sorted lexicographically). The `Batch::new` constructor can enforce
+/// this.
 pub fn hash_batch(batch: &Batch) -> BatchHash {
     let mut hasher = Sha256::new();
-    // Assuming transactions within the batch are already sorted (e.g., by Batch::new).
+    // Assuming transactions within the batch are already sorted (e.g., by
+    // Batch::new).
     for tx in &batch.transactions {
-        // Prefix with length to avoid ambiguities, e.g. hash(tx1 || tx2) vs hash(tx1_prefix_of_txA
-        // || txA_suffix_same_as_tx2)
+        // Prefix with length to avoid ambiguities, e.g. hash(tx1 || tx2) vs
+        // hash(tx1_prefix_of_txA || txA_suffix_same_as_tx2)
         hasher.update((tx.len() as u64).to_le_bytes());
         hasher.update(tx);
     }
@@ -118,8 +121,8 @@ pub enum TimerExpiry {
 
 // --- Output Structures ---
 // DecidedBatch might still be useful to derive Serialize/Deserialize
-// if the application consuming the output of HBBFT wants to easily serialize it,
-// but it's not strictly necessary for the core HBBFT logic itself.
+// if the application consuming the output of HBBFT wants to easily serialize
+// it, but it's not strictly necessary for the core HBBFT logic itself.
 // For now, we'll keep it plain.
 #[derive(Clone, Debug, PartialEq, Eq)] // Removed Serialize/Deserialize for now
 pub struct DecidedBatch {
@@ -254,8 +257,8 @@ mod tests {
 
         assert_ne!(hash1, hash2, "Hash of [[3], [1,2]] should differ from [[1,2,3]]");
         assert_ne!(hash3, hash2, "Hash of [[1], [2,3]] should differ from [[1,2,3]]");
-        // Also ensure batch1 and batch3 are different if their contents are truly different after
-        // sorting
+        // Also ensure batch1 and batch3 are different if their contents are truly
+        // different after sorting
         assert_ne!(hash1, hash3, "Hash of [[3], [1,2]] should differ from [[1], [2,3]]");
     }
 }

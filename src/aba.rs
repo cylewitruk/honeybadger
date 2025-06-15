@@ -17,8 +17,10 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
     /// typically when a round cannot decide based on EST/AUX messages alone.
     ///
     /// This method should:
-    /// 1. Return the node's own share to be broadcast (if applicable for the scheme).
-    /// 2. Indicate if the coin can be determined *now* based on internal state or this call.
+    /// 1. Return the node's own share to be broadcast (if applicable for the
+    ///    scheme).
+    /// 2. Indicate if the coin can be determined *now* based on internal state
+    ///    or this call.
     ///
     /// It does NOT block.
     fn request_coin_value(
@@ -28,7 +30,8 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
     ) -> (Option<CoinShare>, Option<bool>); // (Option<own_share_to_broadcast>, Option<coin_value_if_known_now>)
 
     /// Called by ABA to pass a received coin share message.
-    /// Returns the coin value if this share (and others previously received) completes the coin.
+    /// Returns the coin value if this share (and others previously received)
+    /// completes the coin.
     fn submit_coin_share(
         &mut self,
         epoch: EpochNum,
@@ -37,8 +40,9 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
         sender_id: NodeId, // ID of the node that sent this share
     ) -> Option<bool>; // Option<coin_value_if_decided_now>
 
-    /// Called when an ABA round has timed out and a coin value is mandatorily needed
-    /// to proceed to the next round. This method *must* return a boolean.
+    /// Called when an ABA round has timed out and a coin value is mandatorily
+    /// needed to proceed to the next round. This method *must* return a
+    /// boolean.
     fn get_coin_for_round_fallback(&mut self, epoch: EpochNum, round: AbaRound) -> bool;
 }
 
@@ -123,8 +127,8 @@ impl BinaryByzantineAgreement {
 
     /// Starts the ABA process with an initial value `v`.
     /// This is typically called after the corresponding RBC has delivered.
-    /// The `initial_value` is `true` if RBC delivered, `false` otherwise (or if timed out waiting
-    /// for RBC).
+    /// The `initial_value` is `true` if RBC delivered, `false` otherwise (or if
+    /// timed out waiting for RBC).
     pub fn propose(&mut self, initial_value: bool) -> Result<AbaProcessOutput, HbbftError> {
         if self.current_round != 0 || self.sent_est.contains_key(&0) {
             return Ok(AbaProcessOutput::default()); // Already proposed or past round 0
@@ -170,14 +174,15 @@ impl BinaryByzantineAgreement {
         let sender_id = message.pub_sender_id;
         let mut output = AbaProcessOutput::default();
 
-        // Basic ABA logic (greatly simplified, based on common patterns like Mosteiro-Cao):
-        // This needs to be fleshed out with the specific ABA protocol steps.
-        // Key idea:
+        // Basic ABA logic (greatly simplified, based on common patterns like
+        // Mosteiro-Cao): This needs to be fleshed out with the specific ABA
+        // protocol steps. Key idea:
         // 1. Exchange EST(v) for round r.
         // 2. If N-F EST(v) received, broadcast AUX(v). Update estimate.
         // 3. If N-F AUX(v) received, form a CONF set.
         // 4. If CONF set is singleton {v}, decide v.
-        // 5. Else, use common coin and proceed to next round with new estimate based on coin.
+        // 5. Else, use common coin and proceed to next round with new estimate based on
+        //    coin.
 
         match &message.pub_content {
             // Added early return for old rounds if decided.
@@ -190,12 +195,19 @@ impl BinaryByzantineAgreement {
                     // try_send_aux does not set timers, so no need to update
                     // output.timer_request_to_set
                 } else if *round > self.current_round {
-                    // Queue for future round
-                    let round_ests = self.est_values.entry(*round).or_default();
-                    round_ests.insert(sender_id, *value);
-                    // No immediate response or timer change from a future message
+                    if *round <= self.current_round + self.config.aba_max_future_round_window {
+                        // Queue for future round within the window
+                        let round_ests = self.est_values.entry(*round).or_default();
+                        round_ests.insert(sender_id, *value);
+                    } else {
+                        // DbgPrint!("[ABA ({},{},R{})] Dropped EST for too
+                        // distant future round
+                        // {} (current {})", self.batch_proposer_id, self.epoch,
+                        // self.current_round, round, self.current_round);
+                    }
                 }
-                // Implicitly ignore messages for *round < self.current_round if not decided
+                // Implicitly ignore messages for *round < self.current_round if
+                // not decided
             }
             AbaMessageContent::Aux { value, round } => {
                 if *round == self.current_round {
@@ -209,10 +221,16 @@ impl BinaryByzantineAgreement {
                         output.timer_request_to_set = sub_output.timer_request_to_set;
                     }
                 } else if *round > self.current_round {
-                    // Queue for future round
-                    let round_auxs = self.aux_values.entry(*round).or_default();
-                    round_auxs.insert(sender_id, *value);
-                    // No immediate response or timer change from a future message
+                    if *round <= self.current_round + self.config.aba_max_future_round_window {
+                        // Queue for future round within the window
+                        let round_auxs = self.aux_values.entry(*round).or_default();
+                        round_auxs.insert(sender_id, *value);
+                    } else {
+                        // DbgPrint!("[ABA ({},{},R{})] Dropped AUX for too
+                        // distant future round
+                        // {} (current {})", self.batch_proposer_id, self.epoch,
+                        // self.current_round, round, self.current_round);
+                    }
                 }
             }
             AbaMessageContent::Coin { share, round } => {
@@ -233,8 +251,8 @@ impl BinaryByzantineAgreement {
                         return self.start_next_round(Some(coin_value)); // Return directly
                     }
                     // Else, still waiting for more shares for this round.
-                    // No new messages or timer changes from just one share unless it completes the
-                    // coin.
+                    // No new messages or timer changes from just one share
+                    // unless it completes the coin.
                 }
             }
         }
@@ -242,9 +260,10 @@ impl BinaryByzantineAgreement {
         Ok(output)
     }
 
-    /// Checks if enough EST messages for a value `v` in `round` have been received
-    /// to broadcast an AUX(v) message for that round.
-    /// Returns messages to send (AUX) and potentially timer requests if a new round is started.
+    /// Checks if enough EST messages for a value `v` in `round` have been
+    /// received to broadcast an AUX(v) message for that round.
+    /// Returns messages to send (AUX) and potentially timer requests if a new
+    /// round is started.
     fn try_send_aux(&mut self, round: AbaRound) -> Result<AbaProcessOutput, HbbftError> {
         let mut output = AbaProcessOutput::default();
         if self.sent_aux.get(&round).copied().unwrap_or(false) || self.is_decided() {
@@ -280,9 +299,10 @@ impl BinaryByzantineAgreement {
         Ok(output)
     }
 
-    /// Checks if enough AUX messages for `round` have been received to form a CONF set.
-    /// If CONF set is singleton {v}, decide v.
-    /// Else if CONF set is non-empty (or other conditions met), consult coin and advance.
+    /// Checks if enough AUX messages for `round` have been received to form a
+    /// CONF set. If CONF set is singleton {v}, decide v.
+    /// Else if CONF set is non-empty (or other conditions met), consult coin
+    /// and advance.
     fn try_decide_or_advance_round(
         &mut self,
         round: AbaRound,
@@ -346,8 +366,9 @@ impl BinaryByzantineAgreement {
                         return self.start_next_round(Some(coin_value));
                     } else {
                         self.waiting_for_coin_in_round = Some(round);
-                        // Timer for current round `round` should already be running.
-                        // We are now waiting for Coin messages or timeout for this round.
+                        // Timer for current round `round` should already be
+                        // running. We are now waiting
+                        // for Coin messages or timeout for this round.
                     }
                 }
             } else {
@@ -395,27 +416,29 @@ impl BinaryByzantineAgreement {
                         );
                     }
                 }
-                // If no N-F support and no F+1 support for any value, do nothing, wait for more
-                // messages or timeout.
+                // If no N-F support and no F+1 support for any value, do
+                // nothing, wait for more messages or timeout.
             }
         }
         Ok(output) // Return the (potentially modified) output
     }
 
     /// Handles a timeout for a specific ABA round.
-    /// If the timeout is for the current, undecided round, it consults the coin and starts the next
-    /// round.
+    /// If the timeout is for the current, undecided round, it consults the coin
+    /// and starts the next round.
     pub fn handle_round_timeout(
         &mut self,
         round_that_timed_out: AbaRound,
     ) -> Result<AbaProcessOutput, HbbftError> {
         if self.is_decided() || round_that_timed_out != self.current_round {
-            // Already decided, or timeout is for a past/future round we are not currently in.
+            // Already decided, or timeout is for a past/future round we are not currently
+            // in.
             return Ok(AbaProcessOutput::default());
         }
 
         // DbgPrint!("[ABA ({},{},R{})] Round {} TIMED OUT. Consulting coin.",
-        // self.batch_proposer_id, self.epoch, self.current_round, round_that_timed_out);
+        // self.batch_proposer_id, self.epoch, self.current_round,
+        // round_that_timed_out);
         let coin_val = self
             .coin
             .get_coin_for_round_fallback(self.epoch, self.current_round);
@@ -444,18 +467,19 @@ impl BinaryByzantineAgreement {
             old_round_val, self.current_round
         );
 
-        // The estimate for the new round comes from the coin flip of the *previous* round (round r
-        // determines estimate for r+1). The `proposed_value_for_next_round` argument should
-        // be the result of coin.get_coin(epoch, self.current_round - 1).
+        // The estimate for the new round comes from the coin flip of the *previous*
+        // round (round r determines estimate for r+1). The
+        // `proposed_value_for_next_round` argument should be the result of
+        // coin.get_coin(epoch, self.current_round - 1).
         let val_to_propose = proposed_value_for_next_round.ok_or_else(|| {
             HbbftError::InternalError(
                 "Cannot start next round without proposed value from coin.".to_string(),
             )
         })?;
 
-        // DbgPrint!("[ABA ({},{},R{})] Starting new round. Estimate from coin (for prev round {}):
-        // {}", self.batch_proposer_id, self.epoch, self.current_round, self.current_round -1,
-        // val_to_propose);
+        // DbgPrint!("[ABA ({},{},R{})] Starting new round. Estimate from coin (for prev
+        // round {}): {}", self.batch_proposer_id, self.epoch,
+        // self.current_round, self.current_round -1, val_to_propose);
 
         self.current_estimate = Some(val_to_propose); // Set estimate for new round
         self.sent_est.insert(self.current_round, true);
@@ -465,8 +489,9 @@ impl BinaryByzantineAgreement {
             .or_default()
             .insert(self.own_id, val_to_propose);
 
-        // DbgPrint!("[ABA ({},{},R{})] Starting new round {}. Estimate from coin (for prev round):
-        // {}",     self.batch_proposer_id, self.epoch, self.current_round, val_to_propose);
+        // DbgPrint!("[ABA ({},{},R{})] Starting new round {}. Estimate from coin (for
+        // prev round): {}",     self.batch_proposer_id, self.epoch,
+        // self.current_round, val_to_propose);
 
         let est_message = AbaMessage {
             pub_batch_proposer_id: self.batch_proposer_id,
@@ -487,8 +512,9 @@ impl BinaryByzantineAgreement {
         let mut messages_to_send = vec![est_message];
         let mut current_timer_request = Some(initial_timer_request);
 
-        // Process any messages that might have been queued for this new self.current_round
-        // This might lead to sending AUX, deciding, or even starting another round.
+        // Process any messages that might have been queued for this new
+        // self.current_round This might lead to sending AUX, deciding, or even
+        // starting another round.
         let processing_queued_output = self.process_potential_progress_for_current_round()?;
         messages_to_send.extend(processing_queued_output.messages_to_send);
 
@@ -496,8 +522,8 @@ impl BinaryByzantineAgreement {
             // If processing queued led to a decision
             current_timer_request = None;
         } else if processing_queued_output.timer_request_to_set.is_some() {
-            // If processing queued led to starting an even newer round (e.g. round + 1), use its
-            // timer.
+            // If processing queued led to starting an even newer round (e.g. round + 1),
+            // use its timer.
             current_timer_request = processing_queued_output.timer_request_to_set;
         }
         // Otherwise, the initial_timer_request for self.current_round remains.
@@ -505,8 +531,13 @@ impl BinaryByzantineAgreement {
         Ok(AbaProcessOutput { messages_to_send, timer_request_to_set: current_timer_request })
     }
 
-    /// Helper to process ESTs and AUXs that might have been queued for the current round.
-    /// This is called when a round starts.
+    fn prune_past_round_data(&mut self, current_valid_round: AbaRound) {
+        self.est_values.retain(|&r, _| r >= current_valid_round);
+        self.aux_values.retain(|&r, _| r >= current_valid_round);
+    }
+
+    /// Helper to process ESTs and AUXs that might have been queued for the
+    /// current round. This is called when a round starts.
     fn process_potential_progress_for_current_round(
         &mut self,
     ) -> Result<AbaProcessOutput, HbbftError> {
@@ -516,22 +547,26 @@ impl BinaryByzantineAgreement {
             return Ok(combined_output);
         }
 
-        // Try to send AUX based on current ESTs (which might include previously queued ones for
-        // this round)
+        // Try to send AUX based on current ESTs (which might include previously queued
+        // ones for this round)
         let aux_output = self.try_send_aux(self.current_round)?;
         combined_output
             .messages_to_send
             .extend(aux_output.messages_to_send);
         // try_send_aux doesn't set timers or decide on its own.
 
-        // Try to decide or advance round based on current AUXs (which might include previously
-        // queued ones for this round)
+        // Try to decide or advance round based on current AUXs (which might include
+        // previously queued ones for this round)
         let decide_output = self.try_decide_or_advance_round(self.current_round)?;
         combined_output
             .messages_to_send
             .extend(decide_output.messages_to_send);
-        // This one can set a timer if it starts a new round, or clear it (None) if it decides.
+        // This one can set a timer if it starts a new round, or clear it (None) if it
+        // decides.
         combined_output.timer_request_to_set = decide_output.timer_request_to_set;
+
+        // After processing, prune data for rounds strictly before the current one.
+        self.prune_past_round_data(self.current_round);
 
         Ok(combined_output)
     }
@@ -545,7 +580,8 @@ impl BinaryByzantineAgreement {
         self.decided_value.is_some()
     }
 
-    /// Returns the current round number of this ABA instance (for debugging/checks).
+    /// Returns the current round number of this ABA instance (for
+    /// debugging/checks).
     pub fn current_round_debug(&self) -> AbaRound {
         self.current_round
     }
@@ -553,24 +589,10 @@ impl BinaryByzantineAgreement {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::*;
-    // Import necessary items for creating a dummy CoinFactory
-    use crate::config::CoinFactory;
-    use crate::config::HoneyBadgerConfig;
-
-    fn create_config(n: usize, f: usize, own_id: NodeId) -> Arc<HoneyBadgerConfig> {
-        let all_node_ids: BTreeSet<NodeId> = (0..n as NodeId).collect();
-        let dummy_coin_factory = CoinFactory::new(Arc::new(|_node_id, _epoch, _config| {
-            Box::new(DummyCommonCoin {}) as Box<dyn CommonCoin>
-        }));
-        Arc::new(
-            HoneyBadgerConfig::new(own_id, all_node_ids, f, 3, 1000, 2000, dummy_coin_factory)
-                .unwrap(),
-        )
-    }
+    use crate::testing::create_test_config;
 
     const BATCH_PROPOSER_ID: NodeId = 0;
     const EPOCH_NUM: EpochNum = 1;
@@ -585,7 +607,7 @@ mod tests {
 
     #[test]
     fn aba_propose() {
-        let config = create_config(4, 1, 0);
+        let config = create_test_config(4, 1, 0);
         let mut aba = create_aba_instance(config, 0);
 
         let output = aba.propose(true).unwrap();
@@ -612,7 +634,7 @@ mod tests {
     fn aba_handle_est_to_send_aux() {
         let n = 4;
         let f = 1; // low_threshold = F+1 = 2
-        let config_node0 = create_config(n, f, 0);
+        let config_node0 = create_test_config(n, f, 0);
         let mut aba_node0 = create_aba_instance(Arc::clone(&config_node0), 0);
         let _ = aba_node0.propose(true).unwrap(); // Node 0 proposes EST(true, 0)
 
@@ -625,7 +647,8 @@ mod tests {
         };
         let output = aba_node0.handle_message(&est_msg_node1).unwrap();
 
-        // Node 0 has received 2 EST(true,0) (own + node1's), which is F+1. Should send AUX.
+        // Node 0 has received 2 EST(true,0) (own + node1's), which is F+1. Should send
+        // AUX.
         assert_eq!(output.messages_to_send.len(), 1);
         let msg = &output.messages_to_send[0];
         if let AbaMessageContent::Aux { value, round } = msg.pub_content {
@@ -641,10 +664,10 @@ mod tests {
     fn aba_handle_aux_to_decide() {
         let n = 4;
         let f = 1; // high_threshold = N-F = 3
-        let config_node0 = create_config(n, f, 0);
+        let config_node0 = create_test_config(n, f, 0);
         let mut aba_node0 = create_aba_instance(Arc::clone(&config_node0), 0);
-        // We are directly testing try_decide_or_advance_round, so no need to call propose.
-        // Set current_round to 0 as if propose() was called.
+        // We are directly testing try_decide_or_advance_round, so no need to call
+        // propose. Set current_round to 0 as if propose() was called.
         aba_node0.current_round = 0;
         aba_node0.current_estimate = Some(true); // Consistent with a prior proposal
 
@@ -668,7 +691,7 @@ mod tests {
         // Renamed for clarity
         let n = 4;
         let f = 1; // low_threshold = F+1 = 2; high_threshold = N-F = 3
-        let config_node0 = create_config(n, f, 0);
+        let config_node0 = create_test_config(n, f, 0);
         let mut aba_node0 = create_aba_instance(Arc::clone(&config_node0), 0);
         let _ = aba_node0.propose(true).unwrap(); // Node 0 EST(true,0)
 
@@ -699,7 +722,7 @@ mod tests {
 
     #[test]
     fn aba_future_round_message_queuing() {
-        let config = create_config(4, 1, 0);
+        let config = create_test_config(4, 1, 0);
         let mut aba = create_aba_instance(config, 0);
         let _ = aba.propose(true).unwrap(); // In round 0
 
@@ -714,8 +737,8 @@ mod tests {
         assert!(output_future_est.messages_to_send.is_empty()); // No immediate action
         assert!(aba.est_values.get(&1).unwrap().contains_key(&1));
 
-        // Simulate round 0 timeout, coin is true (0%2==0), so start_next_round(Some(true)) for
-        // round 1
+        // Simulate round 0 timeout, coin is true (0%2==0), so
+        // start_next_round(Some(true)) for round 1
         let output_timeout_r0 = aba.handle_round_timeout(0).unwrap();
         assert_eq!(aba.current_round, 1);
         assert_eq!(aba.current_estimate, Some(true)); // From coin of round 0
@@ -723,8 +746,8 @@ mod tests {
         // The output_timeout_r0 should contain EST(true,1) from node 0.
         // AND, because EST(false,1) from node 1 was queued, and now we are in round 1,
         // process_potential_progress_for_current_round should have been called.
-        // Node 0 has EST(true,1) (own) and EST(false,1) (from node 1). Neither has F+1=2.
-        // So, no AUX should be sent yet from processing queued.
+        // Node 0 has EST(true,1) (own) and EST(false,1) (from node 1). Neither has
+        // F+1=2. So, no AUX should be sent yet from processing queued.
         let has_est_true_r1 = output_timeout_r0.messages_to_send.iter().any(|m| {
             if let AbaMessageContent::Est { value, round } = m.pub_content {
                 value && round == 1
@@ -743,7 +766,7 @@ mod tests {
 
     #[test]
     fn aba_handle_round_timeout() {
-        let config = create_config(4, 1, 0);
+        let config = create_test_config(4, 1, 0);
         let mut aba = create_aba_instance(config, 0);
         let _ = aba.propose(true).unwrap(); // Round 0 starts
 
