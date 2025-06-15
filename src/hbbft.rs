@@ -3,11 +3,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use crate::HbbftError;
 use crate::aba::BinaryByzantineAgreement;
 use crate::config::HoneyBadgerConfig;
 use crate::rbc::ReliableBroadcast;
 use crate::types::{
-    AbaProcessOutput, Batch, DecidedBatch, EpochNum, EpochOutput, HbbftError, HbbftProcessOutput,
+    AbaProcessOutput, Batch, DecidedBatch, EpochNum, EpochOutput, HbbftProcessOutput,
     HoneyBadgerMessage, NodeId, TimerExpiry, TimerRequest, Transaction,
 };
 

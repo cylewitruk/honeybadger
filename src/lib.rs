@@ -1,14 +1,13 @@
 mod aba;
 mod config;
+mod error;
 mod hbbft;
 mod rbc;
-mod thresh_crypto;
 mod types;
 
-// --- Public API Exports ---
-
 // Core state machine and configuration
-pub use config::{CoinFactory, HoneyBadgerConfig}; // Added CoinFactory
+pub use config::{CoinFactory, HoneyBadgerConfig};
+pub use error::HbbftError;
 pub use hbbft::HoneyBadgerBft;
 // Message content types, public if users need to inspect message details
 pub use types::{AbaMessage, AbaMessageContent, RbcMessage, RbcMessageContent};
@@ -20,7 +19,6 @@ pub use types::{
     DecidedBatch, // Represents a finalized batch
     EpochNum,
     EpochOutput,        // For get_epoch_output
-    HbbftError,         // Error type
     HbbftProcessOutput, // Bundles messages, decisions, and timer requests
     HoneyBadgerMessage, // Envelope for network messages
     NodeId,

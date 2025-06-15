@@ -146,26 +146,6 @@ pub struct HbbftProcessOutput {
     pub timer_requests_to_set: Vec<TimerRequest>,
 }
 
-// --- Threshold Cryptography Placeholders ---
-// The `CoinShare` type is used in AbaMessageContent.
-// Specific public key and signature share types for a real threshold coin would be defined by its
-// implementer.
-
-// --- Error Type ---
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HbbftError {
-    InvalidMessage(String),
-    InternalError(String),
-    MisbehavingNode { node_id: NodeId, reason: String },
-    EpochMismatch { expected: EpochNum, got: EpochNum },
-    NotEnoughShares,
-    ConfigurationError(String),
-    // Potentially an error variant for serialization/deserialization issues
-    // if the library were to handle raw bytes at its boundary:
-    // SerializationError(String),
-    // DeserializationError(String),
-}
-
 impl HoneyBadgerMessage {
     pub fn epoch(&self) -> EpochNum {
         match self {

@@ -3,10 +3,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use crate::HbbftError;
 use crate::config::HoneyBadgerConfig;
 use crate::types::{
-    AbaMessage, AbaMessageContent, AbaProcessOutput, AbaRound, CoinShare, EpochNum, HbbftError,
-    NodeId, TimerRequest,
+    AbaMessage, AbaMessageContent, AbaProcessOutput, AbaRound, CoinShare, EpochNum, NodeId,
+    TimerRequest,
 };
 
 // Placeholder for a common coin implementation.

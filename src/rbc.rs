@@ -3,10 +3,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::HbbftError;
 use crate::config::HoneyBadgerConfig;
-use crate::types::{
-    Batch, BatchHash, EpochNum, HbbftError, NodeId, RbcMessage, RbcMessageContent, hash_batch,
-}; // For Arc<HoneyBadgerConfig>
+use crate::types::{Batch, BatchHash, EpochNum, NodeId, RbcMessage, RbcMessageContent, hash_batch};
 
 #[derive(Debug)]
 pub struct ReliableBroadcast {
