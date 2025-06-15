@@ -1,5 +1,11 @@
 // This content is intended for src/hbbft.rs
 
+//! Implements the main HoneyBadgerBFT state machine.
+//!
+//! This module orchestrates the Reliable Broadcast (RBC) and Asynchronous
+//! Binary Agreement (ABA) sub-protocols to achieve byzantine fault-tolerant
+//! consensus on batches of transactions across multiple epochs.
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -12,43 +18,65 @@ use crate::types::{
     HoneyBadgerMessage, NodeId, TimerExpiry, TimerRequest, Transaction,
 };
 
-// Represents the state of HoneyBadgerBFT for a single node.
+/// Represents the state of the HoneyBadgerBFT protocol for a single node.
+///
+/// This struct manages the overall consensus process, including handling
+/// incoming messages, managing sub-protocol instances (RBC and ABA) for
+/// various epochs and proposers, processing timer expiries, and producing
+/// finalized epoch outputs.
 pub struct HoneyBadgerBft {
+    /// Shared configuration for this HBBFT instance.
     config: HoneyBadgerConfig,
+    /// The current epoch number this node is actively working on or has most
+    /// recently completed.
     current_epoch: EpochNum,
-    own_id: NodeId, // For convenience
+    /// The ID of this node. Stored for convenience.
+    own_id: NodeId,
 
-    // Per-epoch state:
-    // For each (proposer_id, epoch), there is an RBC instance.
-    // Map: epoch -> (proposer_id -> RBC instance)
+    /// Stores `ReliableBroadcast` instances.
+    /// Mapping: `EpochNum` -> (`NodeId` (proposer) -> `ReliableBroadcast`
+    /// instance).
     rbc_instances: HashMap<EpochNum, HashMap<NodeId, ReliableBroadcast>>,
 
-    // For each (batch_proposer_id, epoch), there is an ABA instance.
-    // Map: epoch -> (batch_proposer_id -> ABA instance)
+    /// Stores `BinaryByzantineAgreement` instances.
+    /// Mapping: `EpochNum` -> (`NodeId` (batch_proposer) ->
+    /// `BinaryByzantineAgreement` instance).
     aba_instances: HashMap<EpochNum, HashMap<NodeId, BinaryByzantineAgreement>>,
 
-    // Store intended proposed batches for epochs, if we are the proposer.
-    // This stores the batch *before* its RBC is necessarily initiated.
-    // epoch -> (our intended batch for our RBC in this epoch)
+    /// Stores batches this node intends to propose for specific epochs.
+    /// This is populated before the node's own RBC instance for that epoch is
+    /// necessarily initiated. Mapping: `EpochNum` -> `Batch` (this node's
+    /// intended proposal for that epoch).
     my_epoch_proposals: HashMap<EpochNum, Batch>,
 
-    // Store outputs of RBC instances that have decided.
-    // epoch -> (proposer_id -> Batch)
+    /// Stores batches delivered by `ReliableBroadcast` instances.
+    /// Mapping: `EpochNum` -> (`NodeId` (proposer) -> `Batch`).
     rbc_outputs: HashMap<EpochNum, HashMap<NodeId, Batch>>,
 
-    // Store outputs of ABA instances that have decided.
-    // epoch -> (batch_proposer_id -> bool)
+    /// Stores the boolean decisions from `BinaryByzantineAgreement` instances.
+    /// Mapping: `EpochNum` -> (`NodeId` (batch_proposer) -> `bool` (decision)).
     aba_outputs: HashMap<EpochNum, HashMap<NodeId, bool>>,
 
-    // Final decided batches for each epoch, ready for the application.
-    // epoch -> EpochOutput (BTreeMap<NodeId, Batch>)
+    /// Stores the final, ordered set of decided batches for each epoch, ready
+    /// for the application. Mapping: `EpochNum` -> `EpochOutput` (which is
+    /// a `BTreeMap<NodeId, Batch>`).
     decided_epoch_outputs: BTreeMap<EpochNum, EpochOutput>,
 
-    // Transactions waiting to be proposed in a batch.
+    /// A buffer of transactions submitted by the application, waiting to be
+    /// included in a future batch proposal by this node.
     pending_transactions: Vec<Transaction>,
 }
 
 impl HoneyBadgerBft {
+    /// Creates a new `HoneyBadgerBft` instance.
+    ///
+    /// ## Arguments
+    ///
+    /// * `config`: The configuration for this HBBFT instance.
+    /// * `initial_epoch`: The epoch number at which this node will start.
+    ///
+    /// ## Returns
+    /// A new `HoneyBadgerBft` instance.
     pub fn new(config: HoneyBadgerConfig, initial_epoch: EpochNum) -> Self {
         let own_id = config.own_id;
         HoneyBadgerBft {
@@ -66,10 +94,20 @@ impl HoneyBadgerBft {
     }
 
     /// Adds a transaction to the buffer for inclusion in a future batch.
-    /// If this node had previously prepared an empty proposal for the current
-    /// epoch and that proposal's RBC has not yet been initiated, submitting
-    /// a new transaction will trigger a re-proposal for the current epoch
-    /// with the new (and any other pending) transactions.
+    ///
+    /// Transactions are buffered and will be included when this node next
+    /// proposes a batch, typically triggered by `propose_batch` or
+    /// `prepare_and_propose_current_epoch`.
+    ///
+    /// ## Arguments
+    ///
+    /// * `tx`: The `Transaction` to be submitted.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(HbbftProcessOutput)`: Currently returns a default, empty output as
+    ///   this method only buffers the transaction.
+    /// * `Err(HbbftError)`: This path currently does not return errors.
     pub fn submit_transaction(
         &mut self,
         tx: Transaction,
@@ -81,9 +119,23 @@ impl HoneyBadgerBft {
     }
 
     /// Records the intent to propose a batch for a given epoch and may initiate
-    /// its broadcast. This node will propose `own_batch_txs` via its RBC
-    /// instance for this epoch. It also prepares to participate in RBC/ABA
-    /// for all other nodes.
+    /// its broadcast if it's for the current epoch.
+    ///
+    /// This method allows the application to specify the exact content of a
+    /// batch this node should propose for `epoch_num`. It also ensures that
+    /// the necessary RBC and ABA instances are initialized for `epoch_num`
+    /// to allow participation with other nodes.
+    ///
+    /// ## Arguments
+    ///
+    /// * `own_batch_txs`: A vector of `Transaction`s to be included in this
+    ///   node's proposed batch.
+    /// * `epoch_num`: The epoch for which this batch is being proposed.
+    ///
+    /// ## Returns
+    /// * `Ok(HbbftProcessOutput)`: Contains messages to send (e.g., initial RBC
+    ///   messages if proposing for the current epoch) and timer requests.
+    /// * `Err(HbbftError)`: If `epoch_num` is less than the current epoch.
     pub fn propose_batch(
         &mut self,
         own_batch_txs: Vec<Transaction>,
@@ -147,6 +199,23 @@ impl HoneyBadgerBft {
     }
 
     /// Handles an incoming HoneyBadgerMessage.
+    ///
+    /// This is the primary entry point for processing messages received from
+    /// other nodes. It routes the message to the appropriate RBC or ABA
+    /// sub-protocol instance, processes the output from that instance, and
+    /// attempts to finalize the epoch if enough sub-protocols have
+    /// completed.
+    ///
+    /// ## Arguments
+    ///
+    /// * `message`: The `HoneyBadgerMessage` received from the network.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(HbbftProcessOutput)`: Contains any messages to send, newly decided
+    ///   batches, and timer requests.
+    /// * `Err(HbbftError)`: If an error occurs during message processing (e.g.,
+    ///   epoch mismatch).
     pub fn handle_message(
         &mut self,
         message: HoneyBadgerMessage,
@@ -271,6 +340,20 @@ impl HoneyBadgerBft {
     }
 
     /// Handles a timer expiry event notified by the consuming application.
+    ///
+    /// This method processes timer expiries for RBC instances (e.g., waiting
+    /// for a proposer's `VAL`) or ABA rounds. It triggers the appropriate
+    /// timeout handling logic in the sub-protocols and attempts to finalize
+    /// the epoch if the timeout leads to further progress.
+    ///
+    /// ## Arguments
+    ///
+    /// * `expiry`: The `TimerExpiry` event that occurred.
+    ///
+    /// ## Returns
+    /// * `Ok(HbbftProcessOutput)`: Contains any messages to send, newly decided
+    ///   batches, and timer requests.
+    /// * `Err(HbbftError)`: If an error occurs during timeout processing.
     pub fn handle_timer_expiry(
         &mut self,
         expiry: TimerExpiry,
@@ -359,8 +442,14 @@ impl HoneyBadgerBft {
     }
 
     /// Creates RBC and ABA instances for all N nodes for a given epoch if they
-    /// don't exist. This is an internal helper, primarily for instance
-    /// creation.
+    /// don't already exist.
+    ///
+    /// This is an internal helper method used to ensure that the necessary
+    /// sub-protocol instances are initialized when an epoch becomes active,
+    /// either through a proposal or by receiving a message for that epoch.
+    ///
+    /// ## Arguments
+    /// * `epoch_num`: The epoch for which to ensure instances are created.
     fn ensure_epoch_instances_internal(&mut self, epoch_num: EpochNum) {
         if epoch_num < self.current_epoch
             && self
@@ -414,13 +503,31 @@ impl HoneyBadgerBft {
             });
     }
 
+    /// A test-only wrapper around `ensure_epoch_active_and_get_timers`.
+    ///
+    /// This method is exposed for testing purposes to allow direct invocation
+    /// of the internal epoch activation logic.
+    ///
+    /// ## Arguments
+    /// * `epoch_num`: The epoch to activate.
+    ///
+    /// ## Notes
+    /// - This method should only be used in test code.
     #[cfg(any(test, feature = "testing"))]
     pub fn _ensure_epoch_active_and_get_timers(&mut self, epoch_num: EpochNum) {
         self.ensure_epoch_active_and_get_timers(epoch_num);
     }
 
     /// Ensures instances for an epoch are created and returns TimerRequests for
-    /// RBCs of other proposers if their output is not yet known.
+    /// RBCs of other proposers if their output is not yet known for that epoch.
+    ///
+    /// ## Arguments
+    /// * `epoch_num`: The epoch to check and activate.
+    ///
+    /// ## Returns
+    /// `Some(Vec<TimerRequest>)` if any RBC timers need to be set for other
+    /// proposers, `None` otherwise (e.g., if the epoch is old and decided,
+    /// or all RBCs for others have already delivered).
     fn ensure_epoch_active_and_get_timers(
         &mut self,
         epoch_num: EpochNum,
@@ -461,6 +568,12 @@ impl HoneyBadgerBft {
         if rbc_timer_requests.is_empty() { None } else { Some(rbc_timer_requests) }
     }
 
+    /// Stores the output (a delivered batch) of an RBC instance.
+    ///
+    /// ## Arguments
+    /// * `epoch_num`: The epoch of the RBC instance.
+    /// * `proposer_id`: The proposer ID for the RBC instance.
+    /// * `batch`: The `Batch` that was delivered by the RBC.
     fn store_rbc_output(&mut self, epoch_num: EpochNum, proposer_id: NodeId, batch: Batch) {
         self.rbc_outputs
             .entry(epoch_num)
@@ -468,6 +581,22 @@ impl HoneyBadgerBft {
             .insert(proposer_id, batch);
     }
 
+    /// Initiates an ABA instance for a given proposer's batch within an epoch.
+    ///
+    /// This is typically called after an RBC instance either delivers a batch
+    /// (leading to proposing `true` in ABA) or times out (leading to
+    /// proposing `false` in ABA).
+    ///
+    /// ## Arguments
+    /// * `epoch_num`: The epoch number.
+    /// * `batch_proposer_id`: The ID of the proposer whose batch this ABA is
+    ///   for.
+    /// * `rbc_delivered_value`: `true` if the corresponding RBC delivered a
+    ///   batch, `false` otherwise.
+    ///
+    /// ## Returns
+    /// * `Ok(AbaProcessOutput)`: Output from the ABA `propose` call.
+    /// * `Err(HbbftError)`: If an error occurs.
     fn initiate_aba_for_rbc(
         &mut self,
         epoch_num: EpochNum,
@@ -487,6 +616,13 @@ impl HoneyBadgerBft {
         Ok(AbaProcessOutput::default())
     }
 
+    /// Stores the output (a boolean decision) of an ABA instance.
+    ///
+    /// ## Arguments
+    /// * `epoch_num`: The epoch of the ABA instance.
+    /// * `batch_proposer_id`: The proposer ID for whom the ABA instance
+    ///   decided.
+    /// * `value`: The `bool` decision from the ABA.
     fn store_aba_output(&mut self, epoch_num: EpochNum, batch_proposer_id: NodeId, value: bool) {
         self.aba_outputs
             .entry(epoch_num)
@@ -495,7 +631,20 @@ impl HoneyBadgerBft {
     }
 
     /// Checks if all ABA instances for a given epoch have decided.
-    /// If so, collects the final output for that epoch.
+    /// If so, it collects the final output for that epoch (batches from
+    /// proposers whose ABA decided `true` and whose RBC delivered a batch).
+    /// If the epoch is finalized, it also advances `self.current_epoch` and
+    /// prunes old state.
+    ///
+    /// ## Arguments
+    /// * `epoch_num`: The epoch to attempt to finalize.
+    ///
+    /// ## Returns
+    /// * `Ok(HbbftProcessOutput)`: Contains newly decided batches if the epoch
+    ///   was finalized.
+    /// * `Err(HbbftError)`: This path currently does not return errors from
+    ///   `try_finalize_epoch` itself but can propagate errors from sub-calls if
+    ///   they were to occur.
     fn try_finalize_epoch(
         &mut self,
         epoch_num: EpochNum,
@@ -567,6 +716,12 @@ impl HoneyBadgerBft {
     }
 
     /// Retrieves all finalized batches for a given epoch.
+    ///
+    /// ## Arguments
+    /// * `epoch_num`: The epoch number for which to retrieve the output.
+    ///
+    /// ## Returns
+    /// `Some(&EpochOutput)` if the epoch has been finalized, `None` otherwise.
     pub fn get_epoch_output(&self, epoch_num: EpochNum) -> Option<&EpochOutput> {
         self.decided_epoch_outputs
             .get(&epoch_num)
@@ -574,12 +729,23 @@ impl HoneyBadgerBft {
 
     /// Returns the current epoch number this node is working on or has last
     /// completed.
+    ///
+    /// ## Returns
+    /// The current `EpochNum`.
     pub fn current_epoch(&self) -> EpochNum {
         self.current_epoch
     }
 
     /// Prepares and proposes a batch for the current epoch using pending
     /// transactions.
+    ///
+    /// This method takes any transactions currently in
+    /// `self.pending_transactions`, forms a batch, and then calls
+    /// `propose_batch` for `self.current_epoch`.
+    ///
+    /// ## Returns
+    /// * `Ok(HbbftProcessOutput)`: Output from the `propose_batch` call.
+    /// * `Err(HbbftError)`: If `propose_batch` returns an error.
     pub fn prepare_and_propose_current_epoch(&mut self) -> Result<HbbftProcessOutput, HbbftError> {
         let txs_to_propose = std::mem::take(&mut self.pending_transactions);
         // `propose_batch` will handle instance creation, timer requests for others,
@@ -589,6 +755,11 @@ impl HoneyBadgerBft {
     }
 
     /// Prunes state for epochs that are older than the retention window.
+    ///
+    /// This method is called internally after an epoch is finalized and
+    /// `current_epoch` advances. It removes entries from internal state
+    /// maps (RBC/ABA instances, outputs, etc.) for epochs older than
+    /// `max_finalized_epoch - epochs_to_retain_state + 1`.
     fn prune_old_epoch_state(&mut self) {
         let epochs_to_retain = self.config.epochs_to_retain_state;
         if let Some((&max_finalized_epoch, _)) = self
@@ -616,7 +787,16 @@ impl HoneyBadgerBft {
 
     /// Checks if this node has an intended proposal for `epoch_num` and if its
     /// RBC has not been initiated. If so, initiates the RBC and returns
-    /// messages.
+    /// the resulting messages.
+    ///
+    /// ## Arguments
+    /// * `epoch_num`: The epoch for which to potentially broadcast this node's
+    ///   proposal.
+    ///
+    /// ## Returns
+    /// * `Ok(HbbftProcessOutput)`: Contains RBC messages if a proposal was
+    ///   broadcast.
+    /// * `Err(HbbftError)`: If an error occurs during the RBC `propose` call.
     fn try_broadcast_own_proposal_if_ready(
         &mut self,
         epoch_num: EpochNum,
@@ -659,14 +839,26 @@ impl HoneyBadgerBft {
     }
 
     // --- Getters and Helpers ---
+
+    /// Returns a reference to the configuration of this HBBFT instance.
     pub fn config(&self) -> &HoneyBadgerConfig {
         &self.config
     }
 
+    /// Returns the ID of this node.
     pub fn own_id(&self) -> NodeId {
         self.own_id
     }
 
+    /// Returns the counts of entries in various internal epoch-keyed maps.
+    ///
+    /// This method is intended for testing and debugging purposes to inspect
+    /// the size of internal state.
+    ///
+    /// ## Returns
+    /// A tuple containing the number of epochs present in:
+    /// `(rbc_instances, aba_instances, my_epoch_proposals, rbc_outputs,
+    /// aba_outputs, decided_epoch_outputs)`
     #[cfg(any(test, feature = "testing"))]
     pub fn get_internal_map_epoch_counts_for_testing(
         &self,
@@ -681,6 +873,17 @@ impl HoneyBadgerBft {
         )
     }
 
+    /// Returns the oldest epoch numbers found as keys in various internal state
+    /// maps.
+    ///
+    /// This method is intended for testing and debugging, particularly for
+    /// verifying state pruning logic.
+    ///
+    /// ## Returns
+    /// A tuple `(Option<EpochNum>, Option<EpochNum>, Option<EpochNum>)`
+    /// representing: `(oldest_rbc_epoch, oldest_aba_epoch,
+    /// oldest_decided_epoch_output_epoch)`. `None` if the respective map is
+    /// empty.
     #[cfg(any(test, feature = "testing"))]
     pub fn get_oldest_retained_epochs_for_testing(
         &self,
