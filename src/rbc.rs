@@ -397,6 +397,12 @@ impl ReliableBroadcast {
     pub fn is_decided(&self) -> bool {
         self.accepted_hash.is_some()
     }
+
+    /// Checks if the proposer's RBC has been initiated (i.e., VAL/ECHO sent).
+    pub fn is_initiated(&self) -> bool {
+        self.initial_echo_sent_for_hash
+            .is_some()
+    }
 }
 
 #[cfg(test)]

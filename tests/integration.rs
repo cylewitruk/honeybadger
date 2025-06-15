@@ -244,14 +244,45 @@ fn happy_path_transaction_flow() {
 
     for &node_id in &node_ids {
         if node_id != node_receiving_txs {
+            // Other nodes will propose empty batches
             let empty_batch = Batch::new(vec![]);
             expected_decided_batches_e1_set.insert((node_id, empty_batch));
         }
     }
 
+    // Ensure all nodes are at epoch1 before they are asked to propose for it.
+    // This should be implicitly true if epoch0 finalized for all.
+    for node_id_check in &node_ids {
+        assert_eq!(
+            harness
+                .nodes
+                .get(node_id_check)
+                .unwrap()
+                .hbbft
+                .current_epoch(),
+            epoch1,
+            "Node {node_id_check} is not at epoch {epoch1} before proposing for it."
+        );
+    }
+
     // --- Epoch 1: Nodes automatically propose (Node 0 with txs, others empty) ---
-    // No explicit propose call from harness for epoch 1.
-    // HBBFT's internal `prepare_and_propose_current_epoch` should handle it.
+    // After submitting transactions, we explicitly tell node_receiving_txs to
+    // prepare its proposal for epoch1. This ensures it picks up the newly
+    // submitted transactions.
+    harness
+        .prepare_and_propose_on_node(node_receiving_txs, epoch1)
+        .expect("Prepare and propose failed for node_receiving_txs on epoch 1");
+
+    // Explicitly tell other nodes to prepare their (empty) proposals for epoch1.
+    for &other_node_id in &node_ids {
+        if other_node_id != node_receiving_txs {
+            harness
+                .prepare_and_propose_on_node(other_node_id, epoch1)
+                .unwrap_or_else(|e| {
+                    panic!("Prepare and propose failed for node {other_node_id} on epoch 1: {e:?}")
+                });
+        }
+    }
 
     let max_steps_e1 = 1000;
     for i in 0..max_steps_e1 {
@@ -371,17 +402,37 @@ fn happy_path_multiple_epochs() {
     let epoch1: EpochNum = epoch0 + 1;
     let mut expected_decided_batches_e1_set = HashSet::new();
 
-    // In this setup, after epoch 0, `prepare_and_propose_current_epoch` is called
-    // internally. Since we haven't submitted new transactions to the nodes via
-    // the harness, they will propose empty batches for epoch 1.
+    // Ensure all nodes have advanced to epoch1 after epoch0 finalization.
+    // This check confirms that the core HBBFT logic correctly increments its epoch.
+    for node_id_check in &node_ids {
+        assert_eq!(
+            harness
+                .nodes
+                .get(node_id_check)
+                .unwrap()
+                .hbbft
+                .current_epoch(),
+            epoch1,
+            "Node {node_id_check} should be at epoch {epoch1} after epoch 0 finalized."
+        );
+    }
+
+    // Explicitly make each node propose for epoch 1.
+    // Since no new transactions were submitted to these nodes for epoch 1 via the
+    // harness, they will propose their current pending_transactions (which should
+    // be empty).
     for &proposer_id_e1 in &node_ids {
         let empty_batch_e1 = Batch::new(vec![]);
         expected_decided_batches_e1_set.insert((proposer_id_e1, empty_batch_e1));
-    }
 
-    // The proposals for epoch 1 should have been initiated automatically by HBBFT's
-    // `try_finalize_epoch` calling `prepare_and_propose_current_epoch`.
-    // We just need to run the simulation loop to process these.
+        // Instruct node `proposer_id_e1` to prepare and propose for `epoch1`.
+        // Its `hbbft.current_epoch()` should be `epoch1` at this point.
+        harness
+            .prepare_and_propose_on_node(proposer_id_e1, epoch1)
+            .unwrap_or_else(|e| {
+                panic!("Prepare and propose failed for node {proposer_id_e1} on epoch 1: {e:?}")
+            });
+    }
 
     let max_steps_e1 = 1000; // Give more steps for the second epoch
     for i in 0..max_steps_e1 {

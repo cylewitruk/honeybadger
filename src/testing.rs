@@ -199,7 +199,10 @@ impl TestHarness {
 
     pub fn submit_tx_to_node(&mut self, node_id: NodeId, tx: Transaction) {
         if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.hbbft.submit_transaction(tx);
+            match node.hbbft.submit_transaction(tx) {
+                Ok(output) => self.process_hbbft_output(node_id, output),
+                Err(e) => eprintln!("Error submitting tx to node {node_id}: {e:?}"),
+            }
         }
     }
 
