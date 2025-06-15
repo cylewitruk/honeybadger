@@ -655,4 +655,34 @@ impl HoneyBadgerBft {
     pub fn own_id(&self) -> NodeId {
         self.own_id
     }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn get_internal_map_epoch_counts_for_testing(
+        &self,
+    ) -> (usize, usize, usize, usize, usize, usize) {
+        (
+            self.rbc_instances.keys().len(),
+            self.aba_instances.keys().len(),
+            self.my_epoch_proposals.keys().len(),
+            self.rbc_outputs.keys().len(),
+            self.aba_outputs.keys().len(),
+            self.decided_epoch_outputs.keys().len(),
+        )
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn get_oldest_retained_epochs_for_testing(
+        &self,
+    ) -> (Option<EpochNum>, Option<EpochNum>, Option<EpochNum>) {
+        // Returns (oldest_rbc_epoch, oldest_aba_epoch, oldest_decided_epoch)
+        // Useful for checking which specific epochs are retained.
+        let oldest_rbc = self.rbc_instances.keys().min().copied();
+        let oldest_aba = self.aba_instances.keys().min().copied();
+        let oldest_decided = self
+            .decided_epoch_outputs
+            .keys()
+            .min()
+            .copied();
+        (oldest_rbc, oldest_aba, oldest_decided)
+    }
 }

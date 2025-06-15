@@ -126,8 +126,8 @@ This document outlines the testing plan for the `honeybadger` crate, focusing on
 ### Scenarios
 
 - [ ] **Happy Path (All Honest Nodes):**
-  - [ ] Single proposer epoch: all nodes decide on the proposed batch.
-  - [ ] All N nodes propose: all nodes decide on the same set of N batches.
+  - [x] Single proposer epoch: all nodes decide on the proposed batch.
+  - [x] All N nodes propose: all nodes decide on the same set of N batches.
   - [ ] Multiple epochs: correct epoch advancement and decisions over several epochs.
   - [ ] Transaction flow: submitted transactions appear in decided batches.
 - [ ] **RBC Timeout Scenarios:**

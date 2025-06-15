@@ -199,6 +199,146 @@ fn happy_path_all_n_nodes_propose() {
 }
 
 #[test]
+fn state_pruning_works() {
+    let num_nodes = 4;
+    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let epochs_to_retain: EpochNum = 2; // Keep state for only 2 epochs
+
+    let mut harness =
+        TestHarness::new_with_config_modifier(node_ids.clone(), |num_nodes, f, id| {
+            let all_node_ids_set: std::collections::BTreeSet<NodeId> =
+                (0..num_nodes as NodeId).collect();
+            let coin_factory =
+                honeybadger::CoinFactory::new(std::sync::Arc::new(|_node_id, _epoch, _config| {
+                    Box::new(honeybadger::testing::DummyCommonCoin {})
+                }));
+            std::sync::Arc::new(
+                honeybadger::HoneyBadgerConfigBuilder::new(id, all_node_ids_set, f, coin_factory)
+                    .epochs_to_retain_state(epochs_to_retain)
+                    .build()
+                    .unwrap(),
+            )
+        });
+
+    let num_epochs_to_run = epochs_to_retain + 3; // e.g., 2 + 3 = 5 epochs (0, 1, 2, 3, 4)
+
+    for current_epoch_num in 0..num_epochs_to_run {
+        println!("State Pruning Test: Starting epoch {current_epoch_num}");
+
+        // Each node proposes an empty batch in each epoch to ensure activity
+        for &proposer_id in &node_ids {
+            // Ensure node is at the current epoch before proposing
+            // This might involve running steps if a node fell behind, but for this test,
+            // we assume `prepare_and_propose_on_node` handles advancing the node.
+            if harness
+                .nodes
+                .get(&proposer_id)
+                .unwrap()
+                .hbbft
+                .current_epoch()
+                <= current_epoch_num
+            {
+                harness
+                    .prepare_and_propose_on_node(proposer_id, current_epoch_num)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "Prepare and propose failed for node {proposer_id} on epoch \
+                             {current_epoch_num}: {e:?}",
+                        )
+                    });
+            }
+        }
+
+        let max_steps_per_epoch = 1000;
+        for i in 0..max_steps_per_epoch {
+            if harness.all_nodes_decided_epoch(current_epoch_num) {
+                // Ensure all nodes have num_nodes batches for this epoch
+                let mut all_correct_for_epoch = true;
+                for node_id_check in &node_ids {
+                    if let Some(epoch_data) = harness
+                        .finalized_outputs
+                        .get(node_id_check)
+                    {
+                        if let Some(batches) = epoch_data.get(&current_epoch_num) {
+                            if batches.len() != num_nodes {
+                                all_correct_for_epoch = false;
+                                break;
+                            }
+                        } else {
+                            all_correct_for_epoch = false;
+                            break;
+                        }
+                    } else {
+                        all_correct_for_epoch = false;
+                        break;
+                    }
+                }
+                if all_correct_for_epoch {
+                    break;
+                }
+            }
+            if !harness.step() && harness.network_queue.is_empty() && harness.timers.is_empty() {
+                panic!(
+                    "State Pruning Test: Simulation stalled in epoch {current_epoch_num} at step \
+                     {i}"
+                );
+            }
+            if i == max_steps_per_epoch - 1 {
+                panic!(
+                    "State Pruning Test: Max simulation steps reached for epoch \
+                     {current_epoch_num}"
+                );
+            }
+        }
+        assert!(
+            harness.all_nodes_decided_epoch(current_epoch_num),
+            "State Pruning Test: Not all nodes decided on epoch {current_epoch_num}"
+        );
+        println!("State Pruning Test: Epoch {current_epoch_num} finalized.");
+    }
+
+    // After all epochs, check pruning.
+    // current_hbbft_epoch on nodes should be num_epochs_to_run.
+    // max_finalized_epoch_num = num_epochs_to_run - 1.
+    // oldest_retained_stated_epoch = max_finalized_epoch_num - (epochs_to_retain -
+    // 1) = (num_epochs_to_run - 1) -
+    // epochs_to_retain + 1                               = num_epochs_to_run -
+    // epochs_to_retain
+    let expected_oldest_retained_epoch = num_epochs_to_run - epochs_to_retain;
+
+    for node_id in &node_ids {
+        let node = harness.nodes.get(node_id).unwrap();
+        assert_eq!(
+            node.hbbft.current_epoch(),
+            num_epochs_to_run,
+            "Node {node_id} is on an unexpected current_epoch after test completion."
+        );
+        let (_, _, oldest_decided_in_map) = node
+            .hbbft
+            .get_oldest_retained_epochs_for_testing();
+        assert_eq!(
+            oldest_decided_in_map,
+            Some(expected_oldest_retained_epoch),
+            "Node {node_id}: Oldest decided epoch in map is incorrect. Pruning failed or acted \
+             unexpectedly."
+        );
+
+        let (_, _, _, _, _, decided_map_len) = node
+            .hbbft
+            .get_internal_map_epoch_counts_for_testing();
+        assert_eq!(
+            decided_map_len, epochs_to_retain as usize,
+            "Node {node_id}: `decided_epoch_outputs` map has an unexpected number of entries. \
+             Expected {epochs_to_retain}, got {decided_map_len}"
+        );
+    }
+    println!(
+        "State Pruning Test: Pruning verified successfully for {epochs_to_retain} retained epochs \
+         after {num_epochs_to_run} epochs run."
+    );
+}
+
+#[test]
 fn rbc_timeout_proposer_silent() {
     let num_nodes = 4;
     // let f = (num_nodes - 1) / 3; // f=1
