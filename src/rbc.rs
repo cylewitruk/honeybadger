@@ -70,8 +70,12 @@ impl ReliableBroadcast {
                 "Non-proposer tried to initiate RBC VAL".to_string(),
             ));
         }
-        if self.initial_echo_sent_for_hash.is_some()
-            || self.first_val_content_hash_received.is_some()
+        if self
+            .initial_echo_sent_for_hash
+            .is_some()
+            || self
+                .first_val_content_hash_received
+                .is_some()
         {
             // Already proposed and processed our own VAL/ECHO effectively
             return Ok(Vec::new());
@@ -80,7 +84,8 @@ impl ReliableBroadcast {
         let batch_hash = hash_batch(&batch);
 
         // Store our own proposal
-        self.known_payloads.insert(batch_hash, batch.clone());
+        self.known_payloads
+            .insert(batch_hash, batch.clone());
         self.first_val_content_hash_received = Some(batch_hash);
 
         // Mark that we (as proposer) have "sent" our ECHO for this hash
@@ -115,7 +120,10 @@ impl ReliableBroadcast {
     /// Handles an incoming RBC message.
     pub fn handle_message(&mut self, message: &RbcMessage) -> Result<Vec<RbcMessage>, HbbftError> {
         if message.pub_proposer_id != self.proposer_id || message.pub_epoch != self.epoch {
-            return Err(HbbftError::EpochMismatch { expected: self.epoch, got: message.pub_epoch });
+            return Err(HbbftError::EpochMismatch {
+                expected: self.epoch,
+                got: message.pub_epoch,
+            });
         }
         if self.is_decided() {
             // If already decided, no more messages needed from us.
@@ -136,7 +144,9 @@ impl ReliableBroadcast {
 
                 let received_batch_hash = hash_batch(received_batch);
 
-                if self.first_val_content_hash_received.is_some()
+                if self
+                    .first_val_content_hash_received
+                    .is_some()
                     && self.first_val_content_hash_received != Some(received_batch_hash)
                 {
                     // Proposer is equivocating by sending different VAL contents.
@@ -147,14 +157,20 @@ impl ReliableBroadcast {
                     return Ok(Vec::new());
                 }
 
-                if self.first_val_content_hash_received.is_none() {
+                if self
+                    .first_val_content_hash_received
+                    .is_none()
+                {
                     // First time receiving VAL
                     self.known_payloads
                         .insert(received_batch_hash, received_batch.clone());
                     self.first_val_content_hash_received = Some(received_batch_hash);
 
                     // If we haven't sent an ECHO yet for any hash, send one for this VAL's hash.
-                    if self.initial_echo_sent_for_hash.is_none() {
+                    if self
+                        .initial_echo_sent_for_hash
+                        .is_none()
+                    {
                         self.initial_echo_sent_for_hash = Some(received_batch_hash);
                         self.echo_msg_senders
                             .entry(received_batch_hash)
@@ -176,13 +192,19 @@ impl ReliableBroadcast {
 
             RbcMessageContent::Echo(echoed_hash) => {
                 // Ignore ECHO if we don't have the payload. Node should wait for VAL.
-                if !self.known_payloads.contains_key(echoed_hash) {
+                if !self
+                    .known_payloads
+                    .contains_key(echoed_hash)
+                {
                     // DbgPrint!("[RBC ({},{})] Received ECHO for unknown hash {:?}, sender {}",
                     // self.proposer_id, self.epoch, echoed_hash, sender_id);
                     return Ok(Vec::new());
                 }
 
-                let senders = self.echo_msg_senders.entry(*echoed_hash).or_default();
+                let senders = self
+                    .echo_msg_senders
+                    .entry(*echoed_hash)
+                    .or_default();
                 if senders.insert(sender_id) {
                     // If true, new sender added
                     // Try to send our own ECHO (relay condition)
@@ -212,13 +234,19 @@ impl ReliableBroadcast {
 
             RbcMessageContent::Ready(ready_hash) => {
                 // Ignore READY if we don't have the payload.
-                if !self.known_payloads.contains_key(ready_hash) {
+                if !self
+                    .known_payloads
+                    .contains_key(ready_hash)
+                {
                     // DbgPrint!("[RBC ({},{})] Received READY for unknown hash {:?}, sender {}",
                     // self.proposer_id, self.epoch, ready_hash, sender_id);
                     return Ok(Vec::new());
                 }
 
-                let senders = self.ready_msg_senders.entry(*ready_hash).or_default();
+                let senders = self
+                    .ready_msg_senders
+                    .entry(*ready_hash)
+                    .or_default();
                 if senders.insert(sender_id) {
                     // If true, new sender added
                     // Try to send our own READY (relay condition)
@@ -299,10 +327,15 @@ impl ReliableBroadcast {
         }
 
         // Must have payload and have sent ECHO for *this specific hash*
-        if self.known_payloads.contains_key(&hash_to_check)
+        if self
+            .known_payloads
+            .contains_key(&hash_to_check)
             && self.initial_echo_sent_for_hash == Some(hash_to_check)
         {
-            if let Some(echo_senders_for_hash) = self.echo_msg_senders.get(&hash_to_check) {
+            if let Some(echo_senders_for_hash) = self
+                .echo_msg_senders
+                .get(&hash_to_check)
+            {
                 // If N-F ECHOs for this hash (which we also ECHOed)
                 if echo_senders_for_hash.len() >= self.config.high_threshold() {
                     self.ready_sent_for_hash = Some(hash_to_check);
@@ -322,8 +355,9 @@ impl ReliableBroadcast {
                     // After sending READY, immediately check for delivery condition with our own
                     // READY message.
                     if self.accepted_hash.is_none() {
-                        if let Some(ready_senders_for_hash) =
-                            self.ready_msg_senders.get(&hash_to_check)
+                        if let Some(ready_senders_for_hash) = self
+                            .ready_msg_senders
+                            .get(&hash_to_check)
                         {
                             if ready_senders_for_hash.len() >= self.config.high_threshold() {
                                 // DbgPrint!("[RBC ({},{})] DELIVERED hash {:?} (triggered by own
@@ -392,7 +426,11 @@ mod tests {
         assert!(matches!(messages[0].pub_content, RbcMessageContent::Val(_)));
         assert!(matches!(messages[1].pub_content, RbcMessageContent::Echo(_)));
         assert_eq!(rbc.initial_echo_sent_for_hash, Some(hash_batch(&batch)));
-        assert_eq!(rbc.known_payloads.get(&hash_batch(&batch)), Some(&batch));
+        assert_eq!(
+            rbc.known_payloads
+                .get(&hash_batch(&batch)),
+            Some(&batch)
+        );
     }
 
     #[test]
@@ -432,7 +470,9 @@ mod tests {
             pub_sender_id: PROPOSER_ID,
         };
 
-        let responses = rbc_node1.handle_message(&val_message).unwrap();
+        let responses = rbc_node1
+            .handle_message(&val_message)
+            .unwrap();
         assert_eq!(responses.len(), 1); // Node 1 sends ECHO
         assert!(matches!(responses[0].pub_content, RbcMessageContent::Echo(_)));
         if let RbcMessageContent::Echo(hash) = responses[0].pub_content {
@@ -461,10 +501,14 @@ mod tests {
             pub_sender_id: PROPOSER_ID,
         };
 
-        let responses1 = rbc_node1.handle_message(&val_message1).unwrap();
+        let responses1 = rbc_node1
+            .handle_message(&val_message1)
+            .unwrap();
         assert_eq!(responses1.len(), 1); // Sends ECHO for batch1
 
-        let responses2 = rbc_node1.handle_message(&val_message2).unwrap();
+        let responses2 = rbc_node1
+            .handle_message(&val_message2)
+            .unwrap();
         assert!(responses2.is_empty()); // Ignores second, different VAL
         assert_eq!(rbc_node1.first_val_content_hash_received, Some(hash_batch(&batch1)));
     }
@@ -480,7 +524,11 @@ mod tests {
             pub_content: RbcMessageContent::Val(batch.clone()),
             pub_sender_id: 2, // Sent by node 2
         };
-        assert!(rbc_node1.handle_message(&val_message).is_err());
+        assert!(
+            rbc_node1
+                .handle_message(&val_message)
+                .is_err()
+        );
     }
 
     #[test]
@@ -501,7 +549,9 @@ mod tests {
             pub_content: RbcMessageContent::Val(batch.clone()),
             pub_sender_id: 0,
         };
-        let echo1_responses = rbc_node1.handle_message(&val_msg_from_0).unwrap();
+        let echo1_responses = rbc_node1
+            .handle_message(&val_msg_from_0)
+            .unwrap();
         assert_eq!(echo1_responses.len(), 1); // Node1 sends ECHO(h)
         let echo_msg_from_1 = echo1_responses
             .into_iter()
@@ -509,7 +559,9 @@ mod tests {
             .unwrap();
 
         // Node 0 receives ECHO from Node 1
-        let responses_node0_after_echo1 = rbc_node0.handle_message(&echo_msg_from_1).unwrap();
+        let responses_node0_after_echo1 = rbc_node0
+            .handle_message(&echo_msg_from_1)
+            .unwrap();
         // Node 0 already sent ECHO. It has 2 ECHOs (0, 1). F+1 = 2.
         // It should not send READY yet, needs N-F=3 ECHOs.
         assert!(responses_node0_after_echo1.is_empty());
@@ -521,21 +573,27 @@ mod tests {
             pub_content: RbcMessageContent::Echo(batch_hash),
             pub_sender_id: 0,
         };
-        let responses_node1_after_echo0 = rbc_node1.handle_message(&echo_msg_from_0).unwrap();
+        let responses_node1_after_echo0 = rbc_node1
+            .handle_message(&echo_msg_from_0)
+            .unwrap();
         // Node 1 has 2 ECHOs (0, 1). F+1 = 2. It already sent its ECHO.
         // It should not send READY yet, needs N-F=3 ECHOs.
         assert!(responses_node1_after_echo0.is_empty());
 
         // Simulate Node 2 sending ECHO
         let mut rbc_node2 = ReliableBroadcast::new(create_test_config(n, f, 2), 0, EPOCH_NUM, 2);
-        let echo2_responses = rbc_node2.handle_message(&val_msg_from_0).unwrap();
+        let echo2_responses = rbc_node2
+            .handle_message(&val_msg_from_0)
+            .unwrap();
         let echo_msg_from_2 = echo2_responses
             .into_iter()
             .find(|m| matches!(m.pub_content, RbcMessageContent::Echo(_)))
             .unwrap();
 
         // Node 0 receives ECHO from Node 2
-        let responses_node0_after_echo2 = rbc_node0.handle_message(&echo_msg_from_2).unwrap();
+        let responses_node0_after_echo2 = rbc_node0
+            .handle_message(&echo_msg_from_2)
+            .unwrap();
         // Node 0 now has 3 ECHOs (0, 1, 2). N-F = 3. It should send READY.
         assert_eq!(responses_node0_after_echo2.len(), 1);
         let ready_msg_from_node0 = responses_node0_after_echo2[0].clone(); // Clone for later use
@@ -543,13 +601,17 @@ mod tests {
         assert!(!rbc_node0.is_decided()); // Sending own READY doesn't mean decided yet. Needs N-F total received READYs.
 
         // Node 1 receives ECHO from Node 2
-        let responses_node1_after_echo2 = rbc_node1.handle_message(&echo_msg_from_2).unwrap();
+        let responses_node1_after_echo2 = rbc_node1
+            .handle_message(&echo_msg_from_2)
+            .unwrap();
         // Node 1 now has 3 ECHOs (0, 1, 2). N-F = 3. It should send READY.
         assert_eq!(responses_node1_after_echo2.len(), 1);
         assert!(matches!(responses_node1_after_echo2[0].pub_content, RbcMessageContent::Ready(_)));
 
         // Node 1 receives READY from Node 0
-        let responses_node1_after_ready0 = rbc_node1.handle_message(&ready_msg_from_node0).unwrap();
+        let responses_node1_after_ready0 = rbc_node1
+            .handle_message(&ready_msg_from_node0)
+            .unwrap();
         // Node 1 has 2 READYs (0, 1). F+1 = 2. It already sent its READY.
         // It should not decide yet, needs N-F=3 READYs.
         assert!(responses_node1_after_ready0.is_empty());
@@ -568,7 +630,11 @@ mod tests {
             .handle_message(&echo_msg_from_1)
             .unwrap(); // ECHO from 1
         // At this point rbc_node2 has 3 ECHOs (0,1,2) and should have sent READY.
-        assert!(rbc_node2_ready_state.ready_sent_for_hash.is_some());
+        assert!(
+            rbc_node2_ready_state
+                .ready_sent_for_hash
+                .is_some()
+        );
         let ready_msg_from_2 = RbcMessage {
             pub_proposer_id: 0,
             pub_epoch: EPOCH_NUM,
@@ -577,7 +643,9 @@ mod tests {
         };
 
         // Node 1 receives READY from Node 2
-        let responses_node1_after_ready2 = rbc_node1.handle_message(&ready_msg_from_2).unwrap();
+        let responses_node1_after_ready2 = rbc_node1
+            .handle_message(&ready_msg_from_2)
+            .unwrap();
         // Node 1 now has 3 READYs (0, 1, 2). N-F = 3. It should decide.
         assert!(responses_node1_after_ready2.is_empty()); // No new messages to send
         assert!(rbc_node1.is_decided());
@@ -596,14 +664,20 @@ mod tests {
             pub_sender_id: PROPOSER_ID,
         };
 
-        let responses1 = rbc.handle_message(&val_message).unwrap();
+        let responses1 = rbc
+            .handle_message(&val_message)
+            .unwrap();
         assert_eq!(responses1.len(), 1); // Sends ECHO
 
-        let responses2 = rbc.handle_message(&val_message).unwrap(); // Same VAL again
+        let responses2 = rbc
+            .handle_message(&val_message)
+            .unwrap(); // Same VAL again
         assert!(responses2.is_empty()); // Should not send ECHO again
 
         let echo_message = responses1[0].clone();
-        let responses3 = rbc.handle_message(&echo_message).unwrap(); // Process its own ECHO (no-op)
+        let responses3 = rbc
+            .handle_message(&echo_message)
+            .unwrap(); // Process its own ECHO (no-op)
         assert!(responses3.is_empty());
     }
 }

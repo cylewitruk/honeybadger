@@ -46,6 +46,6 @@ condense_wildcard_suffixes = true
 format_strings = true
 
 # Force chained method calls to be wrapped more aggressively.
-chain_width = 60
+chain_width = 40
 
 struct_lit_width = 30
