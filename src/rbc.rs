@@ -9,7 +9,7 @@ use crate::types::{Batch, BatchHash, EpochNum, NodeId, RbcMessage, RbcMessageCon
 
 #[derive(Debug)]
 pub struct ReliableBroadcast {
-    config: Arc<HoneyBadgerConfig>, // Use Arc for shared config
+    config: Arc<HoneyBadgerConfig>,
     proposer_id: NodeId,
     epoch: EpochNum,
     own_id: NodeId,
