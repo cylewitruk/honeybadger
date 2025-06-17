@@ -15,7 +15,7 @@ use crate::error::HbbftError;
 use crate::rbc::ReliableBroadcast;
 use crate::types::{
     AbaProcessOutput, Batch, DecidedBatch, EpochNum, EpochOutput, HbbftProcessOutput,
-    HoneyBadgerMessage, NodeId, TimerExpiry, TimerRequest, Transaction,
+    HoneyBadgerMessage, NodeIdentifier, TimerExpiry, TimerRequest, Transaction,
 };
 
 /// Represents the state of the HoneyBadgerBFT protocol for a single node.
@@ -24,9 +24,9 @@ use crate::types::{
 /// incoming messages, managing sub-protocol instances (RBC and ABA) for
 /// various epochs and proposers, processing timer expiries, and producing
 /// finalized epoch outputs.
-pub struct HoneyBadgerBft {
+pub struct HoneyBadgerBft<NodeId> {
     /// Shared configuration for this HBBFT instance.
-    config: HoneyBadgerConfig,
+    config: HoneyBadgerConfig<NodeId>,
     /// The current epoch number this node is actively working on or has most
     /// recently completed.
     current_epoch: EpochNum,
@@ -36,12 +36,12 @@ pub struct HoneyBadgerBft {
     /// Stores `ReliableBroadcast` instances.
     /// Mapping: `EpochNum` -> (`NodeId` (proposer) -> `ReliableBroadcast`
     /// instance).
-    rbc_instances: HashMap<EpochNum, HashMap<NodeId, ReliableBroadcast>>,
+    rbc_instances: HashMap<EpochNum, HashMap<NodeId, ReliableBroadcast<NodeId>>>,
 
     /// Stores `BinaryByzantineAgreement` instances.
     /// Mapping: `EpochNum` -> (`NodeId` (batch_proposer) ->
     /// `BinaryByzantineAgreement` instance).
-    aba_instances: HashMap<EpochNum, HashMap<NodeId, BinaryByzantineAgreement>>,
+    aba_instances: HashMap<EpochNum, HashMap<NodeId, BinaryByzantineAgreement<NodeId>>>,
 
     /// Stores batches this node intends to propose for specific epochs.
     /// This is populated before the node's own RBC instance for that epoch is
@@ -60,14 +60,17 @@ pub struct HoneyBadgerBft {
     /// Stores the final, ordered set of decided batches for each epoch, ready
     /// for the application. Mapping: `EpochNum` -> `EpochOutput` (which is
     /// a `BTreeMap<NodeId, Batch>`).
-    decided_epoch_outputs: BTreeMap<EpochNum, EpochOutput>,
+    decided_epoch_outputs: BTreeMap<EpochNum, EpochOutput<NodeId>>,
 
     /// A buffer of transactions submitted by the application, waiting to be
     /// included in a future batch proposal by this node.
     pending_transactions: Vec<Transaction>,
 }
 
-impl HoneyBadgerBft {
+impl<NodeId> HoneyBadgerBft<NodeId>
+where
+    NodeId: NodeIdentifier,
+{
     /// Creates a new `HoneyBadgerBft` instance.
     ///
     /// ## Arguments
@@ -77,7 +80,7 @@ impl HoneyBadgerBft {
     ///
     /// ## Returns
     /// A new `HoneyBadgerBft` instance.
-    pub fn new(config: HoneyBadgerConfig, initial_epoch: EpochNum) -> Self {
+    pub fn new(config: HoneyBadgerConfig<NodeId>, initial_epoch: EpochNum) -> Self {
         let own_id = config.own_id;
         HoneyBadgerBft {
             config,
@@ -111,7 +114,7 @@ impl HoneyBadgerBft {
     pub fn submit_transaction(
         &mut self,
         tx: Transaction,
-    ) -> Result<HbbftProcessOutput, HbbftError> {
+    ) -> Result<HbbftProcessOutput<NodeId>, HbbftError<NodeId>> {
         self.pending_transactions.push(tx);
         // Transactions are now only buffered. The application must explicitly call
         // `propose_batch` or `prepare_and_propose_current_epoch` to include them.
@@ -140,7 +143,7 @@ impl HoneyBadgerBft {
         &mut self,
         own_batch_txs: Vec<Transaction>,
         epoch_num: EpochNum,
-    ) -> Result<HbbftProcessOutput, HbbftError> {
+    ) -> Result<HbbftProcessOutput<NodeId>, HbbftError<NodeId>> {
         if epoch_num < self.current_epoch {
             return Err(HbbftError::EpochMismatch {
                 expected: self.current_epoch,
@@ -218,8 +221,8 @@ impl HoneyBadgerBft {
     ///   epoch mismatch).
     pub fn handle_message(
         &mut self,
-        message: HoneyBadgerMessage,
-    ) -> Result<HbbftProcessOutput, HbbftError> {
+        message: HoneyBadgerMessage<NodeId>,
+    ) -> Result<HbbftProcessOutput<NodeId>, HbbftError<NodeId>> {
         let message_epoch = message.epoch();
         if message_epoch < self.current_epoch
             && self
@@ -259,7 +262,7 @@ impl HoneyBadgerBft {
                         if !output_already_recorded && rbc_instance.is_decided() {
                             if let Some(decided_batch) = rbc_instance.output() {
                                 self.store_rbc_output(message_epoch, proposer_id, decided_batch);
-                                let aba_init_output: AbaProcessOutput =
+                                let aba_init_output: AbaProcessOutput<NodeId> =
                                     self.initiate_aba_for_rbc(message_epoch, proposer_id, true)?;
                                 hbbft_output.messages_to_send.extend(
                                     aba_init_output
@@ -356,8 +359,8 @@ impl HoneyBadgerBft {
     /// * `Err(HbbftError)`: If an error occurs during timeout processing.
     pub fn handle_timer_expiry(
         &mut self,
-        expiry: TimerExpiry,
-    ) -> Result<HbbftProcessOutput, HbbftError> {
+        expiry: TimerExpiry<NodeId>,
+    ) -> Result<HbbftProcessOutput<NodeId>, HbbftError<NodeId>> {
         let mut hbbft_output = HbbftProcessOutput::default();
 
         // Determine the epoch affected by this timer expiry and handle the specific
@@ -531,7 +534,7 @@ impl HoneyBadgerBft {
     fn ensure_epoch_active_and_get_timers(
         &mut self,
         epoch_num: EpochNum,
-    ) -> Option<Vec<TimerRequest>> {
+    ) -> Option<Vec<TimerRequest<NodeId>>> {
         if epoch_num < self.current_epoch
             && self
                 .decided_epoch_outputs
@@ -558,9 +561,7 @@ impl HoneyBadgerBft {
                 rbc_timer_requests.push(TimerRequest::SetRbcTimeout {
                     epoch: epoch_num,
                     proposer_id,
-                    suggested_duration_ms: self
-                        .config
-                        .default_rbc_instance_timeout_ms,
+                    suggested_duration: self.config.default_rbc_instance_timeout,
                 });
             }
         }
@@ -602,7 +603,7 @@ impl HoneyBadgerBft {
         epoch_num: EpochNum,
         batch_proposer_id: NodeId,
         rbc_delivered_value: bool,
-    ) -> Result<AbaProcessOutput, HbbftError> {
+    ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         if let Some(aba_map) = self.aba_instances.get_mut(&epoch_num) {
             if let Some(aba_instance) = aba_map.get_mut(&batch_proposer_id) {
                 if !aba_instance.is_decided()
@@ -648,7 +649,7 @@ impl HoneyBadgerBft {
     fn try_finalize_epoch(
         &mut self,
         epoch_num: EpochNum,
-    ) -> Result<HbbftProcessOutput, HbbftError> {
+    ) -> Result<HbbftProcessOutput<NodeId>, HbbftError<NodeId>> {
         let mut output = HbbftProcessOutput::default();
         if self
             .decided_epoch_outputs
@@ -722,7 +723,7 @@ impl HoneyBadgerBft {
     ///
     /// ## Returns
     /// `Some(&EpochOutput)` if the epoch has been finalized, `None` otherwise.
-    pub fn get_epoch_output(&self, epoch_num: EpochNum) -> Option<&EpochOutput> {
+    pub fn get_epoch_output(&self, epoch_num: EpochNum) -> Option<&EpochOutput<NodeId>> {
         self.decided_epoch_outputs
             .get(&epoch_num)
     }
@@ -746,7 +747,9 @@ impl HoneyBadgerBft {
     /// ## Returns
     /// * `Ok(HbbftProcessOutput)`: Output from the `propose_batch` call.
     /// * `Err(HbbftError)`: If `propose_batch` returns an error.
-    pub fn prepare_and_propose_current_epoch(&mut self) -> Result<HbbftProcessOutput, HbbftError> {
+    pub fn prepare_and_propose_current_epoch(
+        &mut self,
+    ) -> Result<HbbftProcessOutput<NodeId>, HbbftError<NodeId>> {
         let txs_to_propose = std::mem::take(&mut self.pending_transactions);
         // `propose_batch` will handle instance creation, timer requests for others,
         // and initiating its own RBC if not already done (via
@@ -800,7 +803,7 @@ impl HoneyBadgerBft {
     fn try_broadcast_own_proposal_if_ready(
         &mut self,
         epoch_num: EpochNum,
-    ) -> Result<HbbftProcessOutput, HbbftError> {
+    ) -> Result<HbbftProcessOutput<NodeId>, HbbftError<NodeId>> {
         let mut output = HbbftProcessOutput::default();
 
         if epoch_num < self.current_epoch {
@@ -841,7 +844,7 @@ impl HoneyBadgerBft {
     // --- Getters and Helpers ---
 
     /// Returns a reference to the configuration of this HBBFT instance.
-    pub fn config(&self) -> &HoneyBadgerConfig {
+    pub fn config(&self) -> &HoneyBadgerConfig<NodeId> {
         &self.config
     }
 

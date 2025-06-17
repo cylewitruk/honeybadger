@@ -1,17 +1,18 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::EpochNum;
 use crate::aba::CommonCoin;
-use crate::types::{AbaRound, NodeId};
+use crate::types::AbaRound;
 
 /// Default number of recent finalized epochs for which to retain detailed
 /// protocol state.
 const DEFAULT_EPOCHS_TO_RETAIN_STATE: EpochNum = 3;
 /// Default timeout duration in milliseconds for an ABA round.
-const DEFAULT_ABA_ROUND_TIMEOUT_MS: u64 = 2000;
+const DEFAULT_ABA_ROUND_TIMEOUT: Duration = Duration::from_millis(2_000);
 /// Default timeout duration in milliseconds for an RBC instance.
-const DEFAULT_RBC_INSTANCE_TIMEOUT_MS: u64 = 5000;
+const DEFAULT_RBC_INSTANCE_TIMEOUT: Duration = Duration::from_millis(5000);
 /// Default maximum number of rounds into the future for which an ABA instance
 /// will queue messages.
 const DEFAULT_ABA_MAX_FUTURE_ROUND_WINDOW: AbaRound = 5;
@@ -21,8 +22,9 @@ const DEFAULT_ABA_MAX_FUTURE_ROUND_WINDOW: AbaRound = 5;
 /// This type alias defines the signature for a function that can produce
 /// `CommonCoin` trait objects. It's used by `CoinFactory` to allow
 /// dependency injection of different common coin mechanisms.
-type ActualCoinFactoryFn =
-    dyn Fn(NodeId, EpochNum, Arc<HoneyBadgerConfig>) -> Box<dyn CommonCoin> + Send + Sync;
+type ActualCoinFactoryFn<NodeId> = dyn Fn(NodeId, EpochNum, Arc<HoneyBadgerConfig<NodeId>>) -> Box<dyn CommonCoin<NodeId = NodeId>>
+    + Send
+    + Sync;
 
 /// A wrapper for a common coin factory function.
 ///
@@ -36,10 +38,10 @@ type ActualCoinFactoryFn =
 ///   derive `Clone` and `Debug`, as function pointers or `dyn Fn` types
 ///   themselves don't directly support these traits in a straightforward manner
 ///   for struct derivation.
-pub struct CoinFactory(Arc<ActualCoinFactoryFn>);
+pub struct CoinFactory<NodeId>(Arc<ActualCoinFactoryFn<NodeId>>);
 
-impl CoinFactory {
-    pub fn new(factory_fn: Arc<ActualCoinFactoryFn>) -> Self {
+impl<NodeId> CoinFactory<NodeId> {
+    pub fn new(factory_fn: Arc<ActualCoinFactoryFn<NodeId>>) -> Self {
         CoinFactory(factory_fn)
     }
 
@@ -58,8 +60,8 @@ impl CoinFactory {
         &self,
         node_id: NodeId,
         epoch_num: EpochNum,
-        config: Arc<HoneyBadgerConfig>,
-    ) -> Box<dyn CommonCoin> {
+        config: Arc<HoneyBadgerConfig<NodeId>>,
+    ) -> Box<dyn CommonCoin<NodeId = NodeId>> {
         (self.0)(node_id, epoch_num, config)
     }
 }
@@ -74,42 +76,50 @@ impl CoinFactory {
 /// It is recommended to use `HoneyBadgerConfigBuilder` to construct instances
 /// of this struct to ensure all parameters are validated.
 #[derive(Clone, Debug)]
-pub struct HoneyBadgerConfig {
+pub struct HoneyBadgerConfig<NodeId> {
     /// The ID of the node this configuration belongs to.
     pub own_id: NodeId,
+
     /// A sorted set of all node IDs participating in the consensus.
     pub all_node_ids: BTreeSet<NodeId>,
+
     /// `N`: The total number of nodes in the network.
     pub num_total_nodes: usize,
+
     /// `F`: The maximum number of faulty (Byzantine) nodes the system is
     /// configured to tolerate. Typically, `N >= 3F + 1`.
     pub num_faulty_nodes: usize,
+
     /// The number of recent finalized epochs for which detailed protocol state
     /// (like RBC/ABA instances and messages) should be retained. Older state
     /// will be pruned.
     pub epochs_to_retain_state: EpochNum,
+
     /// The default timeout duration in milliseconds for an ABA (Asynchronous
     /// Binary Agreement) round.
-    pub default_aba_round_timeout_ms: u64,
+    pub default_aba_round_timeout: Duration,
+
     /// The default timeout duration in milliseconds for an RBC (Reliable
     /// Broadcast) instance if it doesn't receive a `VAL` message from its
     /// proposer.
-    pub default_rbc_instance_timeout_ms: u64,
+    pub default_rbc_instance_timeout: Duration,
+
     /// A factory for creating `CommonCoin` instances for ABA sub-protocols.
-    pub coin_factory: CoinFactory,
+    pub coin_factory: CoinFactory<NodeId>,
+
     /// The maximum number of rounds into the future (relative to an ABA
     /// instance's current round) for which it will queue received `EST` or
     /// `AUX` messages.
     pub aba_max_future_round_window: AbaRound,
 }
 
-impl Clone for CoinFactory {
+impl<NodeId> Clone for CoinFactory<NodeId> {
     fn clone(&self) -> Self {
         CoinFactory(Arc::clone(&self.0))
     }
 }
 
-impl std::fmt::Debug for CoinFactory {
+impl<NodeId> std::fmt::Debug for CoinFactory<NodeId> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("CoinFactory")
             .field(&"<factory_fn>")
@@ -123,21 +133,24 @@ impl std::fmt::Debug for CoinFactory {
 /// and includes validation logic in its `build` method to ensure a consistent
 /// and valid configuration.
 #[derive(Debug)]
-pub struct HoneyBadgerConfigBuilder {
+pub struct HoneyBadgerConfigBuilder<NodeId> {
     // Mandatory fields
     own_id: NodeId,
     all_node_ids: BTreeSet<NodeId>,
     num_faulty_nodes: usize,
-    coin_factory: CoinFactory,
+    coin_factory: CoinFactory<NodeId>,
 
     // Fields with defaults
     epochs_to_retain_state: EpochNum,
-    default_aba_round_timeout_ms: u64,
-    default_rbc_instance_timeout_ms: u64,
+    default_aba_round_timeout: Duration,
+    default_rbc_instance_timeout: Duration,
     aba_max_future_round_window: AbaRound,
 }
 
-impl HoneyBadgerConfigBuilder {
+impl<NodeId> HoneyBadgerConfigBuilder<NodeId>
+where
+    NodeId: PartialEq + Eq + PartialOrd + Ord + core::fmt::Display,
+{
     /// Creates a new builder for `HoneyBadgerConfig`.
     ///
     /// ## Arguments
@@ -151,7 +164,7 @@ impl HoneyBadgerConfigBuilder {
         own_id: NodeId,
         all_node_ids: BTreeSet<NodeId>,
         num_faulty_nodes: usize,
-        coin_factory: CoinFactory,
+        coin_factory: CoinFactory<NodeId>,
     ) -> Self {
         HoneyBadgerConfigBuilder {
             own_id,
@@ -159,8 +172,8 @@ impl HoneyBadgerConfigBuilder {
             num_faulty_nodes,
             coin_factory,
             epochs_to_retain_state: DEFAULT_EPOCHS_TO_RETAIN_STATE,
-            default_aba_round_timeout_ms: DEFAULT_ABA_ROUND_TIMEOUT_MS,
-            default_rbc_instance_timeout_ms: DEFAULT_RBC_INSTANCE_TIMEOUT_MS,
+            default_aba_round_timeout: DEFAULT_ABA_ROUND_TIMEOUT,
+            default_rbc_instance_timeout: DEFAULT_RBC_INSTANCE_TIMEOUT,
             aba_max_future_round_window: DEFAULT_ABA_MAX_FUTURE_ROUND_WINDOW,
         }
     }
@@ -174,21 +187,21 @@ impl HoneyBadgerConfigBuilder {
         self
     }
 
-    /// Sets the default timeout duration in milliseconds for an ABA round.
+    /// Sets the default timeout duration for an ABA round.
     ///
-    /// Default: `DEFAULT_ABA_ROUND_TIMEOUT_MS` (2000ms). Must be greater than
+    /// Default: `DEFAULT_ABA_ROUND_TIMEOUT` (2000ms). Must be greater than
     /// 0.
-    pub fn default_aba_round_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.default_aba_round_timeout_ms = timeout_ms;
+    pub fn default_aba_round_timeout(mut self, timeout: Duration) -> Self {
+        self.default_aba_round_timeout = timeout;
         self
     }
 
-    /// Sets the default timeout duration in milliseconds for an RBC instance.
+    /// Sets the default timeout duration for an RBC instance.
     ///
-    /// Default: `DEFAULT_RBC_INSTANCE_TIMEOUT_MS` (5000ms). Must be greater
+    /// Default: `DEFAULT_RBC_INSTANCE_TIMEOUT` (5000ms). Must be greater
     /// than 0.
-    pub fn default_rbc_instance_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.default_rbc_instance_timeout_ms = timeout_ms;
+    pub fn default_rbc_instance_timeout(mut self, timeout: Duration) -> Self {
+        self.default_rbc_instance_timeout = timeout;
         self
     }
 
@@ -209,7 +222,7 @@ impl HoneyBadgerConfigBuilder {
     /// * `Ok(HoneyBadgerConfig)`: If all parameters are valid.
     /// * `Err(String)`: If any validation check fails, containing an error
     ///   message.
-    pub fn build(self) -> Result<HoneyBadgerConfig, String> {
+    pub fn build(self) -> Result<HoneyBadgerConfig<NodeId>, String> {
         // Validation logic moved here from the old HoneyBadgerConfig::new
         let own_id = self.own_id; // To avoid self.own_id in format strings if self is consumed
         let num_faulty_nodes = self.num_faulty_nodes; // Keep this for the format string below
@@ -235,11 +248,11 @@ impl HoneyBadgerConfigBuilder {
             // Require at least 1 to avoid ambiguity or overly aggressive pruning.
             return Err("epochs_to_retain_state must be at least 1.".to_string());
         }
-        if self.default_aba_round_timeout_ms == 0 {
-            return Err("default_aba_round_timeout_ms must be greater than 0.".to_string());
+        if self.default_aba_round_timeout == Duration::ZERO {
+            return Err("default_aba_round_timeout must be greater than 0.".to_string());
         }
-        if self.default_rbc_instance_timeout_ms == 0 {
-            return Err("default_rbc_instance_timeout_ms must be greater than 0.".to_string());
+        if self.default_rbc_instance_timeout == Duration::ZERO {
+            return Err("default_rbc_instance_timeout must be greater than 0.".to_string());
         }
         if self.aba_max_future_round_window == 0 {
             return Err("aba_max_future_round_window must be at least 1.".to_string());
@@ -251,15 +264,15 @@ impl HoneyBadgerConfigBuilder {
             num_total_nodes,
             num_faulty_nodes,
             epochs_to_retain_state: self.epochs_to_retain_state,
-            default_aba_round_timeout_ms: self.default_aba_round_timeout_ms,
-            default_rbc_instance_timeout_ms: self.default_rbc_instance_timeout_ms,
+            default_aba_round_timeout: self.default_aba_round_timeout,
+            default_rbc_instance_timeout: self.default_rbc_instance_timeout,
             coin_factory: self.coin_factory,
             aba_max_future_round_window: self.aba_max_future_round_window,
         })
     }
 }
 
-impl HoneyBadgerConfig {
+impl<NodeId> HoneyBadgerConfig<NodeId> {
     /// Returns the high threshold for message counts, typically `N - F`.
     ///
     /// This is often used as a quorum size for strong agreement, e.g., needing
@@ -286,10 +299,9 @@ mod tests {
 
     use super::*;
     use crate::testing::DummyCommonCoin;
-    use crate::types::NodeId;
 
-    fn create_node_ids(n: usize) -> BTreeSet<NodeId> {
-        (0..n as NodeId).collect()
+    fn create_node_ids(n: usize) -> BTreeSet<usize> {
+        (0..n).collect()
     }
 
     #[test]
@@ -298,8 +310,8 @@ mod tests {
         let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
         let config = HoneyBadgerConfigBuilder::new(0, all_ids, 1, dummy_coin_factory)
             .epochs_to_retain_state(3)
-            .default_aba_round_timeout_ms(1000)
-            .default_rbc_instance_timeout_ms(2000)
+            .default_aba_round_timeout(Duration::from_millis(1_000))
+            .default_rbc_instance_timeout(Duration::from_millis(2_000))
             .aba_max_future_round_window(5)
             .build();
         assert!(config.is_ok());
@@ -373,22 +385,22 @@ mod tests {
         let dummy_coin_factory = CoinFactory::new(Arc::new(|_, _, _| Box::new(DummyCommonCoin {})));
         let config_aba_timeout =
             HoneyBadgerConfigBuilder::new(0, all_ids.clone(), 1, dummy_coin_factory.clone())
-                .default_aba_round_timeout_ms(0)
+                .default_aba_round_timeout(Duration::ZERO)
                 .build();
         assert!(config_aba_timeout.is_err());
         assert_eq!(
             config_aba_timeout.unwrap_err(),
-            "default_aba_round_timeout_ms must be greater than 0."
+            "default_aba_round_timeout must be greater than 0."
         );
 
         let config_rbc_timeout =
             HoneyBadgerConfigBuilder::new(0, all_ids.clone(), 1, dummy_coin_factory.clone())
-                .default_rbc_instance_timeout_ms(0)
+                .default_rbc_instance_timeout(Duration::ZERO)
                 .build();
         assert!(config_rbc_timeout.is_err());
         assert_eq!(
             config_rbc_timeout.unwrap_err(),
-            "default_rbc_instance_timeout_ms must be greater than 0."
+            "default_rbc_instance_timeout must be greater than 0."
         );
 
         let config_future_window_zero =

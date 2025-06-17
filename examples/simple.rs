@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use honeybadger::{
     CoinFactory, DecidedBatch, EpochNum, HbbftProcessOutput, HoneyBadgerBft,
-    HoneyBadgerConfigBuilder, HoneyBadgerMessage, NodeId, TimerExpiry, TimerRequest, Transaction,
+    HoneyBadgerConfigBuilder, HoneyBadgerMessage, TimerExpiry, TimerRequest, Transaction,
 };
 
 /// A simple demonstration of the HoneyBadgerBFT library.
@@ -18,8 +18,11 @@ fn main() {
     // --- Configuration ---
     let num_nodes: usize = 4;
     let f: usize = (num_nodes - 1) / 3; // Max faulty nodes (N=4, F=1)
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
-    let all_node_ids_set: BTreeSet<NodeId> = node_ids.iter().copied().collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
+    let all_node_ids_set = node_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<usize>>();
 
     // For this simple example, we'll use a DummyCommonCoin.
     // In a real application, you'd provide a secure common coin implementation.
@@ -28,7 +31,7 @@ fn main() {
     }));
 
     // Create configurations and HBBFT instances for each node
-    let mut nodes: HashMap<NodeId, HoneyBadgerBft> = HashMap::new();
+    let mut nodes: HashMap<usize, HoneyBadgerBft<usize>> = HashMap::new();
     for &id in &node_ids {
         let config = Arc::new(
             HoneyBadgerConfigBuilder::new(id, all_node_ids_set.clone(), f, coin_factory.clone())
@@ -41,13 +44,13 @@ fn main() {
 
     // --- Simulation Setup ---
     let epoch_to_run: EpochNum = 0;
-    let proposer_id: NodeId = 0;
+    let proposer_id = 0;
 
     // Network simulation: a simple queue for messages
-    let mut network_queue: VecDeque<HoneyBadgerMessage> = VecDeque::new();
+    let mut network_queue: VecDeque<HoneyBadgerMessage<usize>> = VecDeque::new();
     // Timer simulation: (expiry_time, node_id_timer_is_for, timer_event)
     // In a real app, the application's event loop would manage timers.
-    let mut timer_queue: BTreeMap<Instant, Vec<(NodeId, TimerExpiry)>> = BTreeMap::new();
+    let mut timer_queue: BTreeMap<Instant, Vec<(usize, TimerExpiry<usize>)>> = BTreeMap::new();
     let mut current_sim_time = Instant::now();
 
     // --- Propose a Batch ---
@@ -72,7 +75,7 @@ fn main() {
 
     // --- Simulation Loop ---
     let max_simulation_steps = 1000;
-    let mut decided_outputs: HashMap<NodeId, Vec<DecidedBatch>> = HashMap::new();
+    let mut decided_outputs: HashMap<usize, Vec<DecidedBatch<usize>>> = HashMap::new();
 
     for step in 0..max_simulation_steps {
         let mut progress_made_this_step = false;
@@ -198,25 +201,25 @@ fn main() {
 /// Helper function to process the output of an HBBFT operation.
 /// It adds messages to the network queue and sets timers.
 fn process_hbbft_output(
-    node_id: NodeId, // The node that produced this output
-    output: HbbftProcessOutput,
-    network_queue: &mut VecDeque<HoneyBadgerMessage>,
-    timer_queue: &mut BTreeMap<Instant, Vec<(NodeId, TimerExpiry)>>,
+    node_id: usize, // The node that produced this output
+    output: HbbftProcessOutput<usize>,
+    network_queue: &mut VecDeque<HoneyBadgerMessage<usize>>,
+    timer_queue: &mut BTreeMap<Instant, Vec<(usize, TimerExpiry<usize>)>>,
     current_sim_time: Instant,
-    decided_outputs_opt: Option<&mut HashMap<NodeId, Vec<DecidedBatch>>>,
+    decided_outputs_opt: Option<&mut HashMap<usize, Vec<DecidedBatch<usize>>>>,
 ) {
     for msg in output.messages_to_send {
         network_queue.push_back(msg);
     }
     for timer_req in output.timer_requests_to_set {
-        let (duration_ms, expiry_event_template) = match timer_req {
+        let (duration, expiry_event_template) = match timer_req {
             TimerRequest::SetAbaRoundTimeout {
                 epoch,
                 batch_proposer_id,
                 round,
-                suggested_duration_ms,
+                suggested_duration,
             } => (
-                suggested_duration_ms,
+                suggested_duration,
                 TimerExpiry::AbaRoundTimeout {
                     epoch,
                     batch_proposer_id,
@@ -226,10 +229,10 @@ fn process_hbbft_output(
             TimerRequest::SetRbcTimeout {
                 epoch,
                 proposer_id,
-                suggested_duration_ms,
-            } => (suggested_duration_ms, TimerExpiry::RbcTimeout { epoch, proposer_id }),
+                suggested_duration,
+            } => (suggested_duration, TimerExpiry::RbcTimeout { epoch, proposer_id }),
         };
-        let expiry_time = current_sim_time + Duration::from_millis(duration_ms);
+        let expiry_time = current_sim_time + duration;
         timer_queue
             .entry(expiry_time)
             .or_default()

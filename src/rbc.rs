@@ -3,13 +3,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::HbbftError;
 use crate::config::HoneyBadgerConfig;
-use crate::types::{Batch, BatchHash, EpochNum, NodeId, RbcMessage, RbcMessageContent, hash_batch};
+use crate::types::{Batch, BatchHash, EpochNum, RbcMessage, RbcMessageContent, hash_batch};
+use crate::{HbbftError, NodeIdentifier};
 
 #[derive(Debug)]
-pub struct ReliableBroadcast {
-    config: Arc<HoneyBadgerConfig>,
+pub struct ReliableBroadcast<NodeId> {
+    config: Arc<HoneyBadgerConfig<NodeId>>,
     proposer_id: NodeId,
     epoch: EpochNum,
     own_id: NodeId,
@@ -39,9 +39,9 @@ pub struct ReliableBroadcast {
     first_val_content_hash_received: Option<BatchHash>,
 }
 
-impl ReliableBroadcast {
+impl<NodeId: NodeIdentifier> ReliableBroadcast<NodeId> {
     pub fn new(
-        config: Arc<HoneyBadgerConfig>, // Accept Arc<HoneyBadgerConfig>
+        config: Arc<HoneyBadgerConfig<NodeId>>,
         proposer_id: NodeId,
         epoch: EpochNum,
         own_id: NodeId,
@@ -64,7 +64,7 @@ impl ReliableBroadcast {
 
     /// Initiates RBC if this node is the proposer.
     /// Returns VAL and the proposer's own ECHO message.
-    pub fn propose(&mut self, batch: Batch) -> Result<Vec<RbcMessage>, HbbftError> {
+    pub fn propose(&mut self, batch: Batch) -> Result<Vec<RbcMessage<NodeId>>, HbbftError<NodeId>> {
         if self.own_id != self.proposer_id {
             return Err(HbbftError::InternalError(
                 "Non-proposer tried to initiate RBC VAL".to_string(),
@@ -118,7 +118,10 @@ impl ReliableBroadcast {
     }
 
     /// Handles an incoming RBC message.
-    pub fn handle_message(&mut self, message: &RbcMessage) -> Result<Vec<RbcMessage>, HbbftError> {
+    pub fn handle_message(
+        &mut self,
+        message: &RbcMessage<NodeId>,
+    ) -> Result<Vec<RbcMessage<NodeId>>, HbbftError<NodeId>> {
         if message.pub_proposer_id != self.proposer_id || message.pub_epoch != self.epoch {
             return Err(HbbftError::EpochMismatch {
                 expected: self.epoch,
@@ -319,7 +322,7 @@ impl ReliableBroadcast {
     fn check_and_send_ready_if_conditions_met(
         &mut self,
         hash_to_check: BatchHash,
-    ) -> Result<Vec<RbcMessage>, HbbftError> {
+    ) -> Result<Vec<RbcMessage<NodeId>>, HbbftError<NodeId>> {
         let mut responses = Vec::new();
         if self.ready_sent_for_hash.is_some() || self.is_decided() {
             // Already sent READY or decided
@@ -417,7 +420,7 @@ mod tests {
         Batch::new(vec![vec![tx_content]])
     }
 
-    const PROPOSER_ID: NodeId = 0;
+    const PROPOSER_ID: usize = 0;
     const EPOCH_NUM: EpochNum = 1;
 
     #[test]

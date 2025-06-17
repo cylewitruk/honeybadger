@@ -24,7 +24,7 @@ pub use types::{
     EpochOutput,        // For get_epoch_output
     HbbftProcessOutput, // Bundles messages, decisions, and timer requests
     HoneyBadgerMessage, // Envelope for network messages
-    NodeId,
+    NodeIdentifier,
     TimerExpiry,  // For application to notify HBBFT of timer events
     TimerRequest, // For application-managed timers
     Transaction,

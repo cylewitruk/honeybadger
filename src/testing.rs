@@ -4,16 +4,21 @@ use std::time::{Duration, Instant};
 
 use crate::aba::CommonCoin;
 use crate::config::{CoinFactory, HoneyBadgerConfig, HoneyBadgerConfigBuilder};
-use crate::types::{CoinShare, NodeId};
+use crate::types::{CoinShare, NodeIdentifier};
 use crate::{
     AbaRound, DecidedBatch, EpochNum, HbbftError, HbbftProcessOutput, HoneyBadgerBft,
     HoneyBadgerMessage, TimerExpiry, TimerRequest, Transaction,
 };
 
+// usize is generally not appropriate for NodeIdentifier in a real system,
+// but for testing purposes, we can use it as a simple identifier.
+impl NodeIdentifier for usize {}
+
 #[derive(Debug)]
 pub struct DummyCommonCoin;
 
 impl CommonCoin for DummyCommonCoin {
+    type NodeId = usize;
     fn request_coin_value(
         &mut self,
         _epoch: EpochNum,
@@ -27,7 +32,7 @@ impl CommonCoin for DummyCommonCoin {
         _epoch: EpochNum,
         _round: AbaRound,
         _share_content: CoinShare,
-        _sender_id: NodeId,
+        _sender_id: Self::NodeId,
     ) -> Option<bool> {
         None // Dummy coin doesn't process shares
     }
@@ -40,15 +45,15 @@ impl CommonCoin for DummyCommonCoin {
 /// A mock common coin that requires F+1 shares to decide.
 /// The coin value itself is deterministic based on the round number.
 #[derive(Debug)]
-pub struct MockInteractiveCoin {
-    config: Arc<HoneyBadgerConfig>, // To access F+1 threshold
+pub struct MockInteractiveCoin<NodeId> {
+    config: Arc<HoneyBadgerConfig<NodeId>>, // To access F+1 threshold
     own_id: NodeId,
     // Stores received shares for each round: round -> set of sender_ids
     received_shares_for_round: HashMap<AbaRound, HashSet<NodeId>>,
 }
 
-impl MockInteractiveCoin {
-    pub fn new(config: Arc<HoneyBadgerConfig>, own_id: NodeId) -> Self {
+impl<NodeId> MockInteractiveCoin<NodeId> {
+    pub fn new(config: Arc<HoneyBadgerConfig<NodeId>>, own_id: NodeId) -> Self {
         MockInteractiveCoin {
             config,
             own_id,
@@ -57,7 +62,8 @@ impl MockInteractiveCoin {
     }
 }
 
-impl CommonCoin for MockInteractiveCoin {
+impl<NodeId: NodeIdentifier> CommonCoin for MockInteractiveCoin<NodeId> {
+    type NodeId = NodeId;
     fn request_coin_value(
         &mut self,
         _epoch: EpochNum,
@@ -96,17 +102,17 @@ impl CommonCoin for MockInteractiveCoin {
 
 /// Creates a default `HoneyBadgerConfig` using `DummyCommonCoin` for testing
 /// purposes.
-pub fn create_dummy_config(n: usize, f: usize, own_id: NodeId) -> Arc<HoneyBadgerConfig> {
-    let all_node_ids: BTreeSet<NodeId> = (0..n as NodeId).collect();
+pub fn create_dummy_config(n: usize, f: usize, own_id: usize) -> Arc<HoneyBadgerConfig<usize>> {
+    let all_node_ids = (0..n).collect::<BTreeSet<usize>>();
     let dummy_coin_factory = CoinFactory::new(Arc::new(|_node_id, _epoch, _config| {
-        Box::new(DummyCommonCoin {}) as Box<dyn CommonCoin>
+        Box::new(DummyCommonCoin {}) as Box<dyn CommonCoin<NodeId = usize>>
     }));
 
     Arc::new(
         HoneyBadgerConfigBuilder::new(own_id, all_node_ids, f, dummy_coin_factory)
             .epochs_to_retain_state(3)
-            .default_aba_round_timeout_ms(1000)
-            .default_rbc_instance_timeout_ms(2000)
+            .default_aba_round_timeout(Duration::from_millis(1_000))
+            .default_rbc_instance_timeout(Duration::from_millis(2_000))
             .aba_max_future_round_window(5)
             .build()
             .unwrap(),
@@ -115,15 +121,19 @@ pub fn create_dummy_config(n: usize, f: usize, own_id: NodeId) -> Arc<HoneyBadge
 
 /// Creates a `HoneyBadgerConfig` using `MockInteractiveCoin` for integration
 /// testing.
-pub fn create_interactive_mock_config(
+pub fn create_interactive_mock_config<NodeId>(
     n: usize,
     f: usize,
     own_id: NodeId,
-) -> Arc<HoneyBadgerConfig> {
-    let all_node_ids: BTreeSet<NodeId> = (0..n as NodeId).collect();
+) -> Arc<HoneyBadgerConfig<NodeId>>
+where
+    NodeId: NodeIdentifier + From<usize> + 'static,
+{
+    let all_node_ids: BTreeSet<NodeId> = (0..n).map(NodeId::from).collect();
     let interactive_coin_factory =
         CoinFactory::new(Arc::new(move |node_id, _epoch, config_for_coin| {
-            Box::new(MockInteractiveCoin::new(config_for_coin, node_id)) as Box<dyn CommonCoin>
+            Box::new(MockInteractiveCoin::new(config_for_coin, node_id))
+                as Box<dyn CommonCoin<NodeId = NodeId>>
         }));
 
     Arc::new(
@@ -136,17 +146,17 @@ pub fn create_interactive_mock_config(
 /// Creates a default `HoneyBadgerConfig` for testing purposes.
 /// Uses `DummyCommonCoin` and sets explicit default values consistent
 /// across tests.
-pub fn create_test_config(n: usize, f: usize, own_id: NodeId) -> Arc<HoneyBadgerConfig> {
-    let all_node_ids: BTreeSet<NodeId> = (0..n as NodeId).collect();
+pub fn create_test_config(n: usize, f: usize, own_id: usize) -> Arc<HoneyBadgerConfig<usize>> {
+    let all_node_ids = (0..n).collect::<BTreeSet<usize>>();
     let dummy_coin_factory = CoinFactory::new(Arc::new(|_node_id, _epoch, _config| {
-        Box::new(DummyCommonCoin {}) as Box<dyn CommonCoin>
+        Box::new(DummyCommonCoin {}) as Box<dyn CommonCoin<NodeId = usize>>
     }));
 
     Arc::new(
         HoneyBadgerConfigBuilder::new(own_id, all_node_ids, f, dummy_coin_factory)
             .epochs_to_retain_state(3)
-            .default_aba_round_timeout_ms(1000)
-            .default_rbc_instance_timeout_ms(2000)
+            .default_aba_round_timeout(Duration::from_millis(1_000))
+            .default_rbc_instance_timeout(Duration::from_millis(2_000))
             .aba_max_future_round_window(5)
             .build()
             .unwrap(),
@@ -155,26 +165,29 @@ pub fn create_test_config(n: usize, f: usize, own_id: NodeId) -> Arc<HoneyBadger
 
 pub const DEFAULT_EPOCH: EpochNum = 0;
 
-pub struct SimulatedNode {
-    pub hbbft: HoneyBadgerBft,
+pub struct SimulatedNode<NodeId> {
+    pub hbbft: HoneyBadgerBft<NodeId>,
     pub id: NodeId,
 }
 
-pub struct TestHarness {
-    pub nodes: HashMap<NodeId, SimulatedNode>,
+pub struct TestHarness<NodeId> {
+    pub nodes: HashMap<NodeId, SimulatedNode<NodeId>>,
     /// Global message queue for simplicity. Messages are (sender,
     /// message_content). A real harness might have per-node inboxes.
-    pub network_queue: VecDeque<HoneyBadgerMessage>,
+    pub network_queue: VecDeque<HoneyBadgerMessage<NodeId>>,
     /// Timers: (expiry_time, specific_timer_expiry_event)
-    pub timers: BTreeMap<Instant, Vec<TimerExpiry>>,
+    pub timers: BTreeMap<Instant, Vec<TimerExpiry<NodeId>>>,
     pub current_time: Instant,
     /// Tracks which epoch outputs have been collected from each node
-    pub finalized_outputs: HashMap<NodeId, HashMap<EpochNum, Vec<DecidedBatch>>>,
+    pub finalized_outputs: HashMap<NodeId, HashMap<EpochNum, Vec<DecidedBatch<NodeId>>>>,
     pub num_nodes: usize,
     pub crashed_nodes: HashSet<NodeId>,
 }
 
-impl TestHarness {
+impl<NodeId> TestHarness<NodeId>
+where
+    NodeId: NodeIdentifier + From<usize> + 'static,
+{
     pub fn new(node_ids: Vec<NodeId>) -> Self {
         let mut nodes = HashMap::new();
         let num_nodes = node_ids.len();
@@ -201,7 +214,7 @@ impl TestHarness {
 
     pub fn new_with_config_modifier(
         node_ids: Vec<NodeId>,
-        config_modifier: impl Fn(usize, usize, NodeId) -> Arc<HoneyBadgerConfig>,
+        config_modifier: impl Fn(usize, usize, NodeId) -> Arc<HoneyBadgerConfig<NodeId>>,
     ) -> Self {
         let mut nodes = HashMap::new();
         let num_nodes = node_ids.len();
@@ -234,7 +247,7 @@ impl TestHarness {
     }
 
     /// Directly injects a message into the global network queue.
-    pub fn inject_message(&mut self, message: HoneyBadgerMessage) {
+    pub fn inject_message(&mut self, message: HoneyBadgerMessage<NodeId>) {
         self.network_queue.push_back(message);
     }
 
@@ -256,7 +269,7 @@ impl TestHarness {
         node_id: NodeId,
         epoch: EpochNum,
         batch_txs: Vec<Transaction>,
-    ) -> Result<(), HbbftError> {
+    ) -> Result<(), HbbftError<NodeId>> {
         if self.crashed_nodes.contains(&node_id) {
             return Ok(());
         }
@@ -274,7 +287,7 @@ impl TestHarness {
         &mut self,
         node_id_to_propose: NodeId,
         target_epoch: EpochNum,
-    ) -> Result<(), HbbftError> {
+    ) -> Result<(), HbbftError<NodeId>> {
         if self
             .crashed_nodes
             .contains(&node_id_to_propose)
@@ -282,7 +295,7 @@ impl TestHarness {
             return Ok(());
         }
 
-        let mut outputs_to_process: Vec<(NodeId, HbbftProcessOutput)> = Vec::new();
+        let mut outputs_to_process: Vec<(NodeId, HbbftProcessOutput<NodeId>)> = Vec::new();
 
         if let Some(node) = self.nodes.get_mut(&node_id_to_propose) {
             // Ensure the node is at the correct epoch for proposing.
@@ -317,18 +330,18 @@ impl TestHarness {
         Ok(())
     }
 
-    pub fn process_hbbft_output(&mut self, producer_node_id: NodeId, output: HbbftProcessOutput) {
+    pub fn process_hbbft_output(
+        &mut self,
+        producer_node_id: NodeId,
+        output: HbbftProcessOutput<NodeId>,
+    ) {
         for msg in output.messages_to_send {
             self.network_queue.push_back(msg);
         }
         for timer_req in output.timer_requests_to_set {
             let duration = match timer_req {
-                TimerRequest::SetAbaRoundTimeout { suggested_duration_ms, .. } => {
-                    Duration::from_millis(suggested_duration_ms)
-                }
-                TimerRequest::SetRbcTimeout { suggested_duration_ms, .. } => {
-                    Duration::from_millis(suggested_duration_ms)
-                }
+                TimerRequest::SetAbaRoundTimeout { suggested_duration, .. } => suggested_duration,
+                TimerRequest::SetRbcTimeout { suggested_duration, .. } => suggested_duration,
             };
             let expiry_time = self.current_time + duration;
             let expiry_event = match timer_req {
@@ -369,7 +382,7 @@ impl TestHarness {
     /// Delivers one message from the queue. Returns true if a message was
     /// delivered.
     pub fn deliver_one_message(&mut self) -> bool {
-        let mut outputs_to_process: Vec<(NodeId, HbbftProcessOutput)> = Vec::new();
+        let mut outputs_to_process: Vec<(NodeId, HbbftProcessOutput<NodeId>)> = Vec::new();
 
         if let Some(message) = self.network_queue.pop_front() {
             if self
@@ -413,7 +426,7 @@ impl TestHarness {
     /// Advances time and processes any expired timers.
     pub fn process_timers(&mut self) -> bool {
         let mut processed_timer = false;
-        let mut outputs_to_process: Vec<(NodeId, HbbftProcessOutput)> = Vec::new();
+        let mut outputs_to_process: Vec<(NodeId, HbbftProcessOutput<NodeId>)> = Vec::new();
 
         // Find the next timer to expire
         if let Some((&expiry_time, _)) = self.timers.iter().next() {

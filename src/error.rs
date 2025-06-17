@@ -1,7 +1,7 @@
-use crate::{EpochNum, NodeId};
+use crate::EpochNum;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HbbftError {
+pub enum HbbftError<NodeId> {
     InvalidMessage(String),
     InternalError(String),
     MisbehavingNode { node_id: NodeId, reason: String },

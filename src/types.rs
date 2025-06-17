@@ -1,13 +1,24 @@
 // This content is intended for src/types.rs
 
 use std::collections::BTreeMap;
+use std::fmt::{Debug, Display};
+use std::hash::Hash;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256}; // For hashing
 
 // --- Basic Identifiers ---
-pub type NodeId = u64;
+// pub type NodeId = u64;
 pub type EpochNum = u64;
 pub type AbaRound = u32;
+
+pub trait NodeIdentifier:
+    Debug + Display + Clone + Copy + PartialEq + Eq + PartialOrd + Ord + Hash + Sync + Send
+{
+}
+
+impl NodeIdentifier for u32 {}
+impl NodeIdentifier for u64 {}
 
 // --- Transaction and Batch ---
 pub type Transaction = Vec<u8>; // A transaction is a sequence of bytes
@@ -65,7 +76,7 @@ pub enum RbcMessageContent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct RbcMessage {
+pub struct RbcMessage<NodeId> {
     pub pub_proposer_id: NodeId,
     pub pub_epoch: EpochNum,
     pub pub_content: RbcMessageContent,
@@ -82,7 +93,7 @@ pub enum AbaMessageContent {
 pub type CoinShare = Vec<u8>; // Represents an opaque share for the common coin.
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AbaMessage {
+pub struct AbaMessage<NodeId> {
     pub pub_batch_proposer_id: NodeId,
     pub pub_epoch: EpochNum,
     pub pub_content: AbaMessageContent,
@@ -90,31 +101,31 @@ pub struct AbaMessage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum HoneyBadgerMessage {
-    Rbc(RbcMessage),
-    Aba(AbaMessage),
+pub enum HoneyBadgerMessage<NodeId> {
+    Rbc(RbcMessage<NodeId>),
+    Aba(AbaMessage<NodeId>),
 }
 
 // --- Timer-related types for interaction with the consuming application ---
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TimerRequest {
+pub enum TimerRequest<NodeId> {
     SetAbaRoundTimeout {
         epoch: EpochNum,
         // Identifies which ABA instance this timer is for within the HBBFT context
         batch_proposer_id: NodeId,
         round: AbaRound,
-        suggested_duration_ms: u64,
+        suggested_duration: Duration,
     },
     SetRbcTimeout {
         epoch: EpochNum,
         proposer_id: NodeId, // The proposer of the RBC instance
-        suggested_duration_ms: u64,
+        suggested_duration: Duration,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TimerExpiry {
+pub enum TimerExpiry<NodeId> {
     AbaRoundTimeout { epoch: EpochNum, batch_proposer_id: NodeId, round: AbaRound },
     RbcTimeout { epoch: EpochNum, proposer_id: NodeId },
 }
@@ -125,31 +136,50 @@ pub enum TimerExpiry {
 // it, but it's not strictly necessary for the core HBBFT logic itself.
 // For now, we'll keep it plain.
 #[derive(Clone, Debug, PartialEq, Eq)] // Removed Serialize/Deserialize for now
-pub struct DecidedBatch {
+pub struct DecidedBatch<NodeId> {
     pub batch: Batch,
     pub proposer_id: NodeId,
     pub epoch: EpochNum,
 }
 
 // Map from proposer_id to their accepted Batch for a given epoch
-pub type EpochOutput = BTreeMap<NodeId, Batch>;
+pub type EpochOutput<NodeId> = BTreeMap<NodeId, Batch>;
 
 /// Bundles outputs from an ABA processing step.
-#[derive(Debug, Default, Clone)]
-pub struct AbaProcessOutput {
-    pub messages_to_send: Vec<AbaMessage>,
-    pub timer_request_to_set: Option<TimerRequest>,
+#[derive(Debug, Clone)]
+pub struct AbaProcessOutput<NodeId> {
+    pub messages_to_send: Vec<AbaMessage<NodeId>>,
+    pub timer_request_to_set: Option<TimerRequest<NodeId>>,
+}
+
+impl<NodeId> Default for AbaProcessOutput<NodeId> {
+    fn default() -> Self {
+        AbaProcessOutput {
+            messages_to_send: Vec::new(),
+            timer_request_to_set: None,
+        }
+    }
 }
 
 /// Bundles outputs from an HBBFT processing step.
-#[derive(Debug, Default, Clone)]
-pub struct HbbftProcessOutput {
-    pub messages_to_send: Vec<HoneyBadgerMessage>,
-    pub newly_decided_batches: Vec<DecidedBatch>,
-    pub timer_requests_to_set: Vec<TimerRequest>,
+#[derive(Debug, Clone)]
+pub struct HbbftProcessOutput<NodeId> {
+    pub messages_to_send: Vec<HoneyBadgerMessage<NodeId>>,
+    pub newly_decided_batches: Vec<DecidedBatch<NodeId>>,
+    pub timer_requests_to_set: Vec<TimerRequest<NodeId>>,
 }
 
-impl HoneyBadgerMessage {
+impl<NodeId> Default for HbbftProcessOutput<NodeId> {
+    fn default() -> Self {
+        HbbftProcessOutput {
+            messages_to_send: Vec::new(),
+            newly_decided_batches: Vec::new(),
+            timer_requests_to_set: Vec::new(),
+        }
+    }
+}
+
+impl<NodeId: NodeIdentifier> HoneyBadgerMessage<NodeId> {
     pub fn epoch(&self) -> EpochNum {
         match self {
             HoneyBadgerMessage::Rbc(msg) => msg.pub_epoch,

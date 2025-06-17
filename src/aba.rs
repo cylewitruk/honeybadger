@@ -7,12 +7,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use crate::HbbftError;
 use crate::config::HoneyBadgerConfig;
 use crate::types::{
-    AbaMessage, AbaMessageContent, AbaProcessOutput, AbaRound, CoinShare, EpochNum, NodeId,
-    TimerRequest,
+    AbaMessage, AbaMessageContent, AbaProcessOutput, AbaRound, CoinShare, EpochNum, TimerRequest,
 };
+use crate::{HbbftError, NodeIdentifier};
 
 /// Defines the interface for a common coin mechanism used by ABA.
 ///
@@ -20,6 +19,8 @@ use crate::types::{
 /// instances converge, especially when there's contention or byzantine
 /// behavior.
 pub trait CommonCoin: std::fmt::Debug + Send + Sync {
+    type NodeId: NodeIdentifier;
+
     /// Called by ABA when it needs a coin for a specific epoch and round,
     /// typically when a round cannot decide based on EST/AUX messages alone.
     ///
@@ -58,7 +59,7 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
         epoch: EpochNum,
         round: AbaRound,
         share_content: CoinShare, // The content of the received coin share.
-        sender_id: NodeId,        // ID of the node that sent this share.
+        sender_id: Self::NodeId,  // ID of the node that sent this share.
     ) -> Option<bool>;
 
     /// Called when an ABA round has timed out and a coin value is mandatorily
@@ -84,9 +85,9 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
 /// proposer's batch (identified by `batch_proposer_id` and `epoch`) should be
 /// included.
 #[derive(Debug)]
-pub struct BinaryByzantineAgreement {
+pub struct BinaryByzantineAgreement<NodeId> {
     /// Shared configuration for the HoneyBadgerBFT instance.
-    config: Arc<HoneyBadgerConfig>,
+    config: Arc<HoneyBadgerConfig<NodeId>>,
     /// The ID of the node whose proposed batch this ABA instance is for.
     batch_proposer_id: NodeId,
     /// The epoch number this ABA instance belongs to.
@@ -94,7 +95,7 @@ pub struct BinaryByzantineAgreement {
     /// The ID of the node running this ABA instance.
     own_id: NodeId,
     /// The common coin mechanism used by this ABA instance.
-    coin: Box<dyn CommonCoin>,
+    coin: Box<dyn CommonCoin<NodeId = NodeId>>,
 
     /// The current round number of this ABA instance.
     current_round: AbaRound,
@@ -123,7 +124,7 @@ pub struct BinaryByzantineAgreement {
     waiting_for_coin_in_round: Option<AbaRound>,
 }
 
-impl BinaryByzantineAgreement {
+impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
     /// Creates a new `BinaryByzantineAgreement` instance.
     ///
     /// ## Arguments
@@ -138,11 +139,11 @@ impl BinaryByzantineAgreement {
     /// ## Returns
     /// A new `BinaryByzantineAgreement` instance.
     pub fn new(
-        config: Arc<HoneyBadgerConfig>,
+        config: Arc<HoneyBadgerConfig<NodeId>>,
         batch_proposer_id: NodeId,
         epoch: EpochNum,
         own_id: NodeId,
-        coin: Box<dyn CommonCoin>,
+        coin: Box<dyn CommonCoin<NodeId = NodeId>>,
     ) -> Self {
         BinaryByzantineAgreement {
             config,
@@ -178,9 +179,12 @@ impl BinaryByzantineAgreement {
     ///   and a timer request.
     /// * `Err(HbbftError)`: If an error occurs (though currently this path
     ///   always returns `Ok`).
-    pub fn propose(&mut self, initial_value: bool) -> Result<AbaProcessOutput, HbbftError> {
+    pub fn propose(
+        &mut self,
+        initial_value: bool,
+    ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         if self.current_round != 0 || self.sent_est.contains_key(&0) {
-            return Ok(AbaProcessOutput::default()); // Already proposed or past round 0
+            return Ok(AbaProcessOutput::<NodeId>::default()); // Already proposed or past round 0
         }
 
         self.current_estimate = Some(initial_value);
@@ -201,7 +205,7 @@ impl BinaryByzantineAgreement {
             epoch: self.epoch,
             batch_proposer_id: self.batch_proposer_id,
             round: 0,
-            suggested_duration_ms: self.config.default_aba_round_timeout_ms,
+            suggested_duration: self.config.default_aba_round_timeout,
         };
         Ok(AbaProcessOutput {
             messages_to_send: vec![est_message],
@@ -223,7 +227,10 @@ impl BinaryByzantineAgreement {
     ///   requests generated.
     /// * `Err(HbbftError)`: If the message is for a mismatched epoch or
     ///   proposer.
-    pub fn handle_message(&mut self, message: &AbaMessage) -> Result<AbaProcessOutput, HbbftError> {
+    pub fn handle_message(
+        &mut self,
+        message: &AbaMessage<NodeId>,
+    ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         if message.pub_batch_proposer_id != self.batch_proposer_id
             || message.pub_epoch != self.epoch
         {
@@ -347,7 +354,10 @@ impl BinaryByzantineAgreement {
     /// * `Ok(AbaProcessOutput)`: Contains an `AUX` message if conditions are
     ///   met.
     /// * `Err(HbbftError)`: Currently, this path does not return errors.
-    fn try_send_aux(&mut self, round: AbaRound) -> Result<AbaProcessOutput, HbbftError> {
+    fn try_send_aux(
+        &mut self,
+        round: AbaRound,
+    ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         let mut output = AbaProcessOutput::default();
         if self
             .sent_aux
@@ -408,7 +418,7 @@ impl BinaryByzantineAgreement {
     fn try_decide_or_advance_round(
         &mut self,
         round: AbaRound,
-    ) -> Result<AbaProcessOutput, HbbftError> {
+    ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         let mut output = AbaProcessOutput::default();
         if self.is_decided() {
             return Ok(output); // Return the default, empty output
@@ -520,7 +530,7 @@ impl BinaryByzantineAgreement {
     pub fn handle_round_timeout(
         &mut self,
         round_that_timed_out: AbaRound,
-    ) -> Result<AbaProcessOutput, HbbftError> {
+    ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         if self.is_decided() || round_that_timed_out != self.current_round {
             // Already decided, or timeout is for a past/future round we are not currently
             // in.
@@ -557,7 +567,7 @@ impl BinaryByzantineAgreement {
     fn start_next_round(
         &mut self,
         proposed_value_for_next_round: Option<bool>,
-    ) -> Result<AbaProcessOutput, HbbftError> {
+    ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         eprintln!(
             "[DEBUG ABA] start_next_round entered. is_decided: {}, current_round: {}",
             self.is_decided(),
@@ -615,7 +625,7 @@ impl BinaryByzantineAgreement {
             epoch: self.epoch,
             batch_proposer_id: self.batch_proposer_id,
             round: self.current_round,
-            suggested_duration_ms: self.config.default_aba_round_timeout_ms,
+            suggested_duration: self.config.default_aba_round_timeout,
         };
 
         let mut messages_to_send = vec![est_message];
@@ -671,7 +681,7 @@ impl BinaryByzantineAgreement {
     /// * `Err(HbbftError)`: If an error occurs during processing.
     fn process_potential_progress_for_current_round(
         &mut self,
-    ) -> Result<AbaProcessOutput, HbbftError> {
+    ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         let mut combined_output = AbaProcessOutput::default();
 
         if self.is_decided() {
@@ -729,13 +739,13 @@ mod tests {
     use super::*;
     use crate::testing::{DummyCommonCoin, create_test_config};
 
-    const BATCH_PROPOSER_ID: NodeId = 0;
+    const BATCH_PROPOSER_ID: usize = 0;
     const EPOCH_NUM: EpochNum = 1;
 
     fn create_aba_instance(
-        config: Arc<HoneyBadgerConfig>,
-        own_id: NodeId,
-    ) -> BinaryByzantineAgreement {
+        config: Arc<HoneyBadgerConfig<usize>>,
+        own_id: usize,
+    ) -> BinaryByzantineAgreement<usize> {
         let coin = Box::new(DummyCommonCoin {});
         BinaryByzantineAgreement::new(config, BATCH_PROPOSER_ID, EPOCH_NUM, own_id, coin)
     }

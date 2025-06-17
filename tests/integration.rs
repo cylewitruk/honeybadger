@@ -1,9 +1,10 @@
 // This content is intended for tests/integration.rs
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+use std::sync::Arc;
 
-use honeybadger::testing::{DEFAULT_EPOCH, TestHarness};
-use honeybadger::{Batch, EpochNum, NodeId, TimerExpiry, Transaction};
+use honeybadger::testing::{DEFAULT_EPOCH, DummyCommonCoin, TestHarness};
+use honeybadger::{Batch, EpochNum, TimerExpiry, Transaction};
 
 /// ## Purpose/Intent
 ///
@@ -24,10 +25,10 @@ use honeybadger::{Batch, EpochNum, NodeId, TimerExpiry, Transaction};
 #[test]
 fn happy_path_single_proposer_epoch() {
     let num_nodes = 4;
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     let mut harness = TestHarness::new(node_ids.clone());
 
-    let proposer_id: NodeId = 0;
+    let proposer_id = 0;
     let epoch_to_test: EpochNum = DEFAULT_EPOCH;
 
     let tx1: Transaction = vec![1, 2, 3];
@@ -129,7 +130,7 @@ fn happy_path_single_proposer_epoch() {
 #[test]
 fn happy_path_all_n_nodes_propose() {
     let num_nodes = 4;
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     let mut harness = TestHarness::new(node_ids.clone());
 
     let epoch_to_test: EpochNum = DEFAULT_EPOCH;
@@ -218,7 +219,7 @@ fn happy_path_all_n_nodes_propose() {
             batch_count = node_output_for_epoch.len(),
         );
 
-        let decided_set_for_node: HashSet<(NodeId, Batch)> = node_output_for_epoch
+        let decided_set_for_node: HashSet<(usize, Batch)> = node_output_for_epoch
             .iter()
             .map(|db| (db.proposer_id, db.batch.clone()))
             .collect();
@@ -254,16 +255,15 @@ fn happy_path_all_n_nodes_propose() {
 #[test]
 fn state_pruning_works() {
     let num_nodes = 4;
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     let epochs_to_retain: EpochNum = 2; // Keep state for only 2 epochs
 
     let mut harness =
         TestHarness::new_with_config_modifier(node_ids.clone(), |num_nodes, f, id| {
-            let all_node_ids_set: std::collections::BTreeSet<NodeId> =
-                (0..num_nodes as NodeId).collect();
+            let all_node_ids_set = (0..num_nodes).collect::<BTreeSet<usize>>();
             let coin_factory =
-                honeybadger::CoinFactory::new(std::sync::Arc::new(|_node_id, _epoch, _config| {
-                    Box::new(honeybadger::testing::DummyCommonCoin {})
+                honeybadger::CoinFactory::new(Arc::new(|_node_id, _epoch, _config| {
+                    Box::new(DummyCommonCoin {})
                 }));
             std::sync::Arc::new(
                 honeybadger::HoneyBadgerConfigBuilder::new(id, all_node_ids_set, f, coin_factory)
@@ -414,7 +414,7 @@ fn fault_tolerance_f_crashed_nodes() {
     let f = (num_nodes - 1) / 3; // f=1 for N=4
     assert_eq!(f, 1, "This test is designed for N=4, F=1");
 
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     let mut harness = TestHarness::new(node_ids.clone());
 
     // --- Epoch 0: All nodes are honest and propose ---
@@ -458,17 +458,17 @@ fn fault_tolerance_f_crashed_nodes() {
     println!("Fault Tolerance Test: Epoch 0 finalized by all nodes.");
 
     // --- Crash F nodes ---
-    let nodes_to_crash: Vec<NodeId> = node_ids
+    let nodes_to_crash = node_ids
         .iter()
         .take(f)
         .copied()
-        .collect();
+        .collect::<Vec<_>>();
     harness.crash_nodes(&nodes_to_crash);
-    let correct_node_ids: Vec<NodeId> = node_ids
+    let correct_node_ids = node_ids
         .iter()
         .filter(|id| !nodes_to_crash.contains(id))
         .copied()
-        .collect();
+        .collect::<Vec<_>>();
     assert_eq!(correct_node_ids.len(), num_nodes - f);
 
     // --- Epoch 1: F nodes are crashed, N-F nodes propose ---
@@ -572,7 +572,7 @@ fn fault_tolerance_f_crashed_nodes() {
             "Node {node_id} (correct) decided on wrong number of batches for epoch 1"
         );
 
-        let decided_set_for_node: HashSet<(NodeId, Batch)> = node_output_e1
+        let decided_set_for_node: HashSet<(usize, Batch)> = node_output_e1
             .iter()
             .map(|db| (db.proposer_id, db.batch.clone()))
             .collect();
@@ -629,16 +629,16 @@ fn fault_tolerance_f_crashed_nodes() {
 #[test]
 fn rbc_proposer_equivocation() {
     let num_nodes = 4;
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     // Use DummyCommonCoin for this test to make ABA behavior more predictable,
     // especially for the equivocator's own ABA instance.
-    let mut harness =
+    let mut harness: TestHarness<usize> =
         TestHarness::new_with_config_modifier(node_ids.clone(), |num_nodes, f, id| {
             honeybadger::testing::create_dummy_config(num_nodes, f, id)
         });
 
     let epoch_to_test: EpochNum = DEFAULT_EPOCH;
-    let equivocating_proposer_id: NodeId = 0;
+    let equivocating_proposer_id = 0;
 
     println!(
         "RBC Equivocation Test: Proposer {equivocating_proposer_id} will equivocate in epoch \
@@ -730,7 +730,7 @@ fn rbc_proposer_equivocation() {
             .unwrap()
             .get(&epoch_to_test)
             .unwrap();
-        let decided_set_for_node: HashSet<(NodeId, Batch)> = node_output_for_epoch
+        let decided_set_for_node: HashSet<(usize, Batch)> = node_output_for_epoch
             .iter()
             .map(|db| (db.proposer_id, db.batch.clone()))
             .collect();
@@ -806,7 +806,7 @@ fn rbc_proposer_equivocation() {
 #[test]
 fn aba_est_equivocation() {
     let num_nodes = 4;
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     // Use DummyCommonCoin for predictability
     let mut harness =
         TestHarness::new_with_config_modifier(node_ids.clone(), |num_nodes, f, id| {
@@ -814,8 +814,8 @@ fn aba_est_equivocation() {
         });
 
     let epoch_to_test: EpochNum = DEFAULT_EPOCH;
-    let target_proposer_for_aba: NodeId = 1; // ABA instance will be for this proposer's batch
-    let equivocating_node_id: NodeId = 0; // This node will send conflicting ESTs
+    let target_proposer_for_aba = 1; // ABA instance will be for this proposer's batch
+    let equivocating_node_id = 0; // This node will send conflicting ESTs
 
     println!(
         "ABA EST Equivocation Test: Node {equivocating_node_id} will equivocate EST for ABA \
@@ -918,7 +918,7 @@ fn aba_est_equivocation() {
     // correct nodes (and the equivocator in this model) should arrive at the
     // same conclusion for the epoch's content.
 
-    let mut first_node_final_set: Option<HashSet<(NodeId, Batch)>> = None;
+    let mut first_node_final_set: Option<HashSet<(usize, Batch)>> = None;
     for &node_id_check in &node_ids {
         let node_output_for_epoch = harness
             .finalized_outputs
@@ -926,7 +926,7 @@ fn aba_est_equivocation() {
             .unwrap()
             .get(&epoch_to_test)
             .unwrap();
-        let current_decided_set: HashSet<(NodeId, Batch)> = node_output_for_epoch
+        let current_decided_set: HashSet<(usize, Batch)> = node_output_for_epoch
             .iter()
             .map(|db| (db.proposer_id, db.batch.clone()))
             .collect();
@@ -982,10 +982,10 @@ fn aba_est_equivocation() {
 fn rbc_timeout_proposer_silent() {
     let num_nodes = 4;
     // let f = (num_nodes - 1) / 3; // f=1
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     let mut harness = TestHarness::new(node_ids.clone());
 
-    let silent_proposer_id: NodeId = 0;
+    let silent_proposer_id = 0;
     let epoch_to_test: EpochNum = DEFAULT_EPOCH;
 
     // Other nodes prepare to participate in epoch 0.
@@ -1093,7 +1093,7 @@ fn rbc_timeout_proposer_silent() {
             expected_count = num_nodes - 1
         );
 
-        let decided_set_for_node: HashSet<(NodeId, Batch)> = node_output_for_epoch
+        let decided_set_for_node: HashSet<(usize, Batch)> = node_output_for_epoch
             .iter()
             .map(|db| (db.proposer_id, db.batch.clone()))
             .collect();
@@ -1133,7 +1133,7 @@ fn rbc_timeout_proposer_silent() {
 #[test]
 fn aba_round_timeout_and_recovery() {
     let num_nodes = 4;
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     // Use a harness with DummyCommonCoin for this test, as we are testing
     // the timeout fallback and immediate coin paths, not share exchange.
     let mut harness =
@@ -1141,7 +1141,7 @@ fn aba_round_timeout_and_recovery() {
             honeybadger::testing::create_dummy_config(num_nodes, f, id)
         });
 
-    let proposer_id: NodeId = 0;
+    let proposer_id = 0;
     let epoch_to_test: EpochNum = DEFAULT_EPOCH;
 
     let tx1: Transaction = vec![7, 8, 9];
@@ -1286,12 +1286,12 @@ fn aba_round_timeout_and_recovery() {
 #[test]
 fn happy_path_transaction_flow() {
     let num_nodes = 4;
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     let mut harness = TestHarness::new(node_ids.clone());
 
     // --- Epoch 0: Synchronize and advance ---
     let epoch0: EpochNum = DEFAULT_EPOCH;
-    let proposer_id_e0: NodeId = 0; // Arbitrary proposer for epoch 0
+    let proposer_id_e0 = 0; // Arbitrary proposer for epoch 0
     harness
         .propose_on_node(proposer_id_e0, epoch0, vec![]) // Propose empty batch for sync
         .expect("Propose failed for epoch 0");
@@ -1313,7 +1313,7 @@ fn happy_path_transaction_flow() {
 
     // --- Submit Transactions for Epoch 1 ---
     let epoch1: EpochNum = epoch0 + 1;
-    let node_receiving_txs: NodeId = 0; // Node 0 will receive and propose these txs
+    let node_receiving_txs = 0; // Node 0 will receive and propose these txs
 
     let tx_a: Transaction = vec![1, 1, 1];
     let tx_b: Transaction = vec![2, 2, 2];
@@ -1419,7 +1419,7 @@ fn happy_path_transaction_flow() {
             "Epoch 1, Node {node_id_check}: Expected {num_nodes} batches",
         );
 
-        let decided_set_for_node_e1: HashSet<(NodeId, Batch)> = node_output_e1
+        let decided_set_for_node_e1: HashSet<(usize, Batch)> = node_output_e1
             .iter()
             .map(|db| (db.proposer_id, db.batch.clone()))
             .collect();
@@ -1449,12 +1449,12 @@ fn happy_path_transaction_flow() {
 #[test]
 fn happy_path_multiple_epochs() {
     let num_nodes = 4;
-    let node_ids: Vec<NodeId> = (0..num_nodes as NodeId).collect();
+    let node_ids = (0..num_nodes).collect::<Vec<_>>();
     let mut harness = TestHarness::new(node_ids.clone());
 
     // --- Epoch 0 ---
     let epoch0: EpochNum = DEFAULT_EPOCH;
-    let proposer_id_e0: NodeId = 0;
+    let proposer_id_e0 = 0;
     let tx_e0: Transaction = vec![10, 20, 30];
     let proposed_batch_txs_e0 = vec![tx_e0.clone()];
     let expected_batch_e0 = Batch::new(proposed_batch_txs_e0.clone());
@@ -1582,7 +1582,7 @@ fn happy_path_multiple_epochs() {
             num_nodes,
             "Epoch 1, Node {node_id_check}: Expected {num_nodes} batches",
         );
-        let decided_set_for_node_e1: HashSet<(NodeId, Batch)> = node_output_e1
+        let decided_set_for_node_e1: HashSet<(usize, Batch)> = node_output_e1
             .iter()
             .map(|db| (db.proposer_id, db.batch.clone()))
             .collect();
