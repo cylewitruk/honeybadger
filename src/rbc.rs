@@ -1,4 +1,10 @@
-// This content is intended for src/rbc.rs
+//! Implements the Reliable Broadcast (RBC) sub-protocol.
+//!
+//! RBC is a fundamental building block in distributed consensus protocols like
+//! HoneyBadgerBFT. It ensures that if a designated proposer sends a value (a
+//! batch of transactions in this context), then all correct nodes eventually
+//! deliver the same value, even if the proposer is Byzantine. If the proposer
+//! is correct and broadcasts a value, all correct nodes deliver that value.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -7,39 +13,72 @@ use crate::config::HoneyBadgerConfig;
 use crate::types::{Batch, BatchHash, EpochNum, RbcMessage, RbcMessageContent, hash_batch};
 use crate::{HbbftError, NodeIdentifier};
 
+/// Represents the state of a single Reliable Broadcast instance.
+///
+/// Each RBC instance is associated with a specific proposer and epoch. It
+/// manages the exchange of VAL, ECHO, and READY messages to agree on a single
+/// batch proposed by the `proposer_id`.
 #[derive(Debug)]
 pub struct ReliableBroadcast<NodeId> {
+    /// Shared configuration for this HBBFT instance.
     config: Arc<HoneyBadgerConfig<NodeId>>,
+    /// The identifier of the node proposing the batch for this RBC instance.
     proposer_id: NodeId,
+    /// The epoch number this RBC instance belongs to.
     epoch: EpochNum,
+    /// The identifier of the node on which this RBC instance is running.
     own_id: NodeId,
 
-    // Payload storage: maps hash to the actual batch.
-    // Populated when a VAL(batch) is received and validated.
+    /// Stores the actual batch data, keyed by their hash.
+    /// This is populated when a `VAL(batch)` message is received from the
+    /// proposer and its hash is validated, or when this node is the proposer.
     known_payloads: HashMap<BatchHash, Batch>,
 
-    // Tracks the hash we've sent ECHO for. A node sends ECHO for at most one hash.
+    /// Tracks the hash for which this node has sent its initial `ECHO` message.
+    /// A node sends an `ECHO` message for at most one hash in a single RBC
+    /// instance to prevent amplifying equivocations.
     initial_echo_sent_for_hash: Option<BatchHash>,
-    // Tracks the hash we've sent READY for. A node sends READY for at most one hash.
+    /// Tracks the hash for which this node has sent a `READY` message.
+    /// A node sends a `READY` message for at most one hash in a single RBC
+    /// instance.
     ready_sent_for_hash: Option<BatchHash>,
 
-    // Stores senders for ECHO messages, per hash.
+    /// Stores the set of sender node IDs for `ECHO` messages received, keyed by
+    /// the batch hash they are echoing.
     echo_msg_senders: HashMap<BatchHash, HashSet<NodeId>>,
-    // Stores senders for READY messages, per hash.
+    /// Stores the set of sender node IDs for `READY` messages received, keyed
+    /// by the batch hash they are ready for.
     ready_msg_senders: HashMap<BatchHash, HashSet<NodeId>>,
 
-    // Final accepted hash for this RBC instance.
+    /// The hash of the batch that has been accepted (delivered) by this RBC
+    /// instance. `None` if no batch has been delivered yet.
     accepted_hash: Option<BatchHash>,
-    // Flag to ensure output() is called only once effectively.
+    /// A flag to ensure that the `output()` method returns the decided batch
+    /// only once, effectively making `output()` idempotent for retrieval.
     accepted_batch_delivered: bool,
 
-    // Keep track of the first VAL message content received from the proposer.
-    // This is to detect/ignore proposer equivocation regarding the batch content.
-    // If proposer sends VAL(b1) then VAL(b2), we stick to the first one.
+    /// Stores the hash of the content of the first `VAL` message received from
+    /// the proposer.
+    /// This is used to detect and ignore if the proposer equivocates by sending
+    /// `VAL` messages with different batch contents. The instance sticks to the
+    /// content of the first valid `VAL` message.
     first_val_content_hash_received: Option<BatchHash>,
 }
 
 impl<NodeId: NodeIdentifier> ReliableBroadcast<NodeId> {
+    /// Creates a new `ReliableBroadcast` instance.
+    ///
+    /// ## Arguments
+    ///
+    /// * `config`: The shared `HoneyBadgerConfig` for the HBBFT instance.
+    /// * `proposer_id`: The ID of the node designated as the proposer for this
+    ///   RBC instance.
+    /// * `epoch`: The epoch number to which this RBC instance belongs.
+    /// * `own_id`: The ID of the node on which this RBC instance is running.
+    ///
+    /// ## Returns
+    ///
+    /// A new `ReliableBroadcast` instance initialized for the given parameters.
     pub fn new(
         config: Arc<HoneyBadgerConfig<NodeId>>,
         proposer_id: NodeId,
@@ -62,8 +101,26 @@ impl<NodeId: NodeIdentifier> ReliableBroadcast<NodeId> {
         }
     }
 
-    /// Initiates RBC if this node is the proposer.
-    /// Returns VAL and the proposer's own ECHO message.
+    /// Initiates the RBC protocol if this node is the designated proposer.
+    ///
+    /// This method should only be called by the node whose `own_id` matches the
+    /// `proposer_id` for this RBC instance. It constructs and returns the
+    /// initial `VAL` message (containing the batch) and the proposer's own
+    /// `ECHO` message for that batch's hash.
+    ///
+    /// ## Arguments
+    ///
+    /// * `batch`: The `Batch` of transactions to be proposed and broadcast.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(Vec<RbcMessage<NodeId>>)`: A vector containing the `VAL` and
+    ///   `ECHO` messages to be broadcast if the calling node is the proposer
+    ///   and hasn't proposed already. May also include a `READY` message if
+    ///   conditions are met (e.g., in a small network). Returns an empty vector
+    ///   if already proposed.
+    /// * `Err(HbbftError::InternalError)`: If a non-proposer node attempts to
+    ///   call this method.
     pub fn propose(&mut self, batch: Batch) -> Result<Vec<RbcMessage<NodeId>>, HbbftError<NodeId>> {
         if self.own_id != self.proposer_id {
             return Err(HbbftError::InternalError(
@@ -117,7 +174,26 @@ impl<NodeId: NodeIdentifier> ReliableBroadcast<NodeId> {
         Ok(messages)
     }
 
-    /// Handles an incoming RBC message.
+    /// Handles an incoming RBC message (`VAL`, `ECHO`, or `READY`).
+    ///
+    /// This method processes the received message according to the RBC protocol
+    /// rules, updates the internal state, and returns a vector of messages (if
+    /// any) that this node needs to send as a result.
+    ///
+    /// ## Arguments
+    ///
+    /// * `message`: A reference to the `RbcMessage` received from another node.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(Vec<RbcMessage<NodeId>>)`: A vector of `RbcMessage`s that this
+    ///   node should broadcast in response. This could include `ECHO` or
+    ///   `READY` messages. Returns an empty vector if no response is needed or
+    ///   if the instance has already decided.
+    /// * `Err(HbbftError::EpochMismatch)`: If the message's epoch or proposer
+    ///   ID does not match this RBC instance.
+    /// * `Err(HbbftError::InvalidMessage)`: If a `VAL` message is received from
+    ///   a node other than the designated proposer.
     pub fn handle_message(
         &mut self,
         message: &RbcMessage<NodeId>,
@@ -316,9 +392,27 @@ impl<NodeId: NodeIdentifier> ReliableBroadcast<NodeId> {
         Ok(responses)
     }
 
-    /// Helper to check and generate READY message if conditions met.
-    /// This is called after receiving VAL, ECHO, or processing our own
-    /// proposal.
+    /// Checks conditions and generates a `READY` message if met.
+    ///
+    /// This internal helper method is called after processing a `VAL` or `ECHO`
+    /// message, or after the proposer initiates with `propose`. It checks if
+    /// this node has received a sufficient number of `ECHO` messages for a
+    /// specific batch hash (for which it also has the payload and has sent its
+    /// own `ECHO`) to justify sending a `READY` message.
+    ///
+    /// ## Arguments
+    ///
+    /// * `hash_to_check`: The `BatchHash` for which to check `READY`
+    ///   conditions.
+    ///
+    /// ## Returns
+    ///
+    /// * `Ok(Vec<RbcMessage<NodeId>>)`: A vector containing a `READY` message
+    ///   if conditions are met and this node hasn't sent `READY` yet. Also
+    ///   checks for delivery if sending `READY` leads to N-F total `READY`s.
+    ///   Returns an empty vector otherwise.
+    /// * `Err(HbbftError)`: This method currently does not return errors
+    ///   directly but propagates them from sub-calls if they were to occur.
     fn check_and_send_ready_if_conditions_met(
         &mut self,
         hash_to_check: BatchHash,
@@ -376,7 +470,28 @@ impl<NodeId: NodeIdentifier> ReliableBroadcast<NodeId> {
         Ok(responses)
     }
 
-    /// Returns the decided Batch if RBC has completed.
+    /// Returns the decided `Batch` if the RBC instance has completed and
+    /// delivered a value.
+    ///
+    /// This method should be called to retrieve the outcome of the RBC. It
+    /// returns the batch associated with the `accepted_hash` if a decision has
+    /// been reached.
+    ///
+    /// ## Returns
+    ///
+    /// * `Some(Batch)`: The `Batch` that was reliably broadcast and agreed
+    ///   upon, if a decision has been made and the batch hasn't been retrieved
+    ///   via this method before.
+    /// * `None`: If the RBC instance has not yet decided, or if the decided
+    ///   batch has already been retrieved by a previous call to `output()`, or
+    ///   in the unlikely event of an internal inconsistency (e.g., accepted
+    ///   hash without payload).
+    ///
+    /// ## Notes
+    ///
+    /// - This method is designed to be called once to retrieve the output.
+    ///   Subsequent calls after a successful retrieval will return `None` due
+    ///   to the `accepted_batch_delivered` flag.
     pub fn output(&mut self) -> Option<Batch> {
         if self.accepted_batch_delivered || self.accepted_hash.is_none() {
             return None;
@@ -397,11 +512,33 @@ impl<NodeId: NodeIdentifier> ReliableBroadcast<NodeId> {
         None
     }
 
+    /// Checks if this RBC instance has reached a decision (i.e., delivered a
+    /// batch).
+    ///
+    /// A decision is reached when `accepted_hash` is set, typically after
+    /// receiving N-F `READY` messages for a consistent batch hash.
+    ///
+    /// ## Returns
+    ///
+    /// * `true`: If the RBC instance has decided on a batch.
+    /// * `false`: Otherwise.
     pub fn is_decided(&self) -> bool {
         self.accepted_hash.is_some()
     }
 
-    /// Checks if the proposer's RBC has been initiated (i.e., VAL/ECHO sent).
+    /// Checks if this RBC instance has been initiated by the proposer.
+    ///
+    /// For the proposer node, this means `propose()` has been called. For other
+    /// nodes, this typically means they have processed the proposer's `VAL`
+    /// message and sent their own `ECHO`, or relayed an `ECHO` based on
+    /// others. More precisely, it checks if `initial_echo_sent_for_hash` is
+    /// set.
+    ///
+    /// ## Returns
+    ///
+    /// * `true`: If the node has sent its initial `ECHO` message for some batch
+    ///   hash.
+    /// * `false`: Otherwise.
     pub fn is_initiated(&self) -> bool {
         self.initial_echo_sent_for_hash
             .is_some()
