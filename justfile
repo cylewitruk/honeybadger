@@ -56,3 +56,6 @@ lint:
 
 fmt:
     cargo +nightly fmt --all
+
+demo scenario_name:
+    cargo run -p honeybadger-demo -- {{scenario_name}}

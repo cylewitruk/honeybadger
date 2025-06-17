@@ -1,0 +1,14 @@
+[package]
+name = "honeybadger-demo"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+testing = []
+
+[dependencies]
+honeybadger.workspace = true
+sha2.workspace = true
+frost-secp256k1.workspace = true
+rand_chacha.workspace = true

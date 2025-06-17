@@ -9,6 +9,7 @@ mod types;
 pub mod testing;
 
 // Core state machine and configuration
+pub use aba::CommonCoin;
 pub use config::{CoinFactory, HoneyBadgerConfig, HoneyBadgerConfigBuilder};
 pub use error::HbbftError;
 pub use hbbft::HoneyBadgerBft;
@@ -19,6 +20,7 @@ pub use types::{
     AbaRound, // Though less common for direct use, it's part of TimerRequest
     Batch,    // Useful for constructing/inspecting batches, e.g. in DecidedBatch
     BatchHash,
+    CoinShare,
     DecidedBatch, // Represents a finalized batch
     EpochNum,
     EpochOutput,        // For get_epoch_output
