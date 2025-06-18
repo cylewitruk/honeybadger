@@ -12,3 +12,4 @@ honeybadger.workspace = true
 sha2.workspace = true
 frost-secp256k1.workspace = true
 rand_chacha.workspace = true
+rand_core.workspace = true

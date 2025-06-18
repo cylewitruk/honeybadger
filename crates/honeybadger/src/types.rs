@@ -119,6 +119,18 @@ pub fn hash_batch(batch: &Batch) -> BatchHash {
     hash_array
 }
 
+/// Output of a CommonCoin processing step.
+#[derive(Debug, Default, Clone)] // Added Clone
+pub struct CoinOutput {
+    // Renamed to avoid confusion with AbaProcessOutput
+    /// A share/message this node should broadcast for the coin protocol.
+    pub share_to_broadcast: Option<CoinShare>,
+    /// The final boolean value if the coin has been decided for the given
+    /// (epoch, round).
+    pub decided_value: Option<bool>,
+    // Future consideration: Could also include coin-specific timer requests.
+}
+
 // =============================================================================
 // MESSAGE TYPES
 // =============================================================================

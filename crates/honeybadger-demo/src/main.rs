@@ -22,6 +22,8 @@
 //! - `fallback`: Demonstrates the coin fallback logic when not enough shares
 //!   are received.
 
+mod frost_seed;
+
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::sync::Arc;
@@ -891,9 +893,11 @@ pub fn main() {
     match args[1].as_str() {
         "integration" => run_integration_scenario(),
         "fallback" => run_fallback_scenario(),
+        "seed-integration" => frost_seed::run_seed_coin_integration_scenario(),
+        "seed-fallback" => frost_seed::run_seed_coin_fallback_scenario(),
         _ => {
             println!("Unknown scenario: {}", args[1]);
-            println!("Available scenarios: integration, fallback");
+            println!("Available scenarios: integration, fallback, seed-integration, seed-fallback");
         }
     }
 }
