@@ -17,8 +17,8 @@ use frost_secp256k1::{
     self as frost, Identifier as FrostIdentifier, Signature, SigningPackage, round1, round2,
 };
 use honeybadger::{
-    AbaRound, CoinFactory, CoinShare, CommonCoin, EpochNum, HbbftError, HoneyBadgerConfig,
-    HoneyBadgerConfigBuilder, NodeIdentifier,
+    AbaRound, CoinFactory, CoinOutput, CoinShare, CommonCoin, EpochNum, HbbftError,
+    HoneyBadgerConfig, HoneyBadgerConfigBuilder, NodeIdentifier,
 };
 use rand_chacha::ChaCha20Rng;
 use rand_core::{OsRng, SeedableRng as _};
@@ -244,11 +244,7 @@ impl<NodeId: NodeIdentifier> SeedBasedFrostCoin<NodeId> {
 impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
     type NodeId = NodeId;
 
-    fn request_coin_value(
-        &mut self,
-        epoch: EpochNum,
-        round: AbaRound,
-    ) -> (Option<CoinShare>, Option<bool>) {
+    fn request_coin_value(&mut self, epoch: EpochNum, round: AbaRound) -> CoinOutput {
         let hbbft_epoch_round_key = (epoch, round);
 
         match &self.seed_generation_state {
@@ -258,12 +254,12 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                     .reconstructed_derived_coins
                     .get(&hbbft_epoch_round_key)
                 {
-                    return (None, Some(value));
+                    return CoinOutput::with_value(value);
                 }
                 let value = Self::derive_coin_from_seed(seed, epoch, round);
                 self.reconstructed_derived_coins
                     .insert(hbbft_epoch_round_key, value);
-                (None, Some(value))
+                CoinOutput::with_value(value)
             }
             SeedGenerationState::NotStarted => {
                 eprintln!(
@@ -294,7 +290,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                         .serialize()
                         .unwrap(),
                 );
-                (Some(commitment_bytes), None)
+                CoinOutput::with_share(commitment_bytes)
             }
             SeedGenerationState::AwaitingSeedCommitments {
                 own_seed_commitments, // Already sent this one
@@ -330,7 +326,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                         .serialize()
                         .unwrap(),
                 );
-                (Some(commitment_bytes), None)
+                CoinOutput::with_share(commitment_bytes)
             }
             SeedGenerationState::AwaitingSeedShares {
                 own_seed_share_bytes, // This is the FROST Round 2 share for the SEED
@@ -346,7 +342,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 );
                 // We are in FROST Round 2 for the SEED. Return our own share.
                 // The actual aggregation to get the SEED will happen in submit_coin_share.
-                (own_seed_share_bytes.clone(), None)
+                CoinOutput::with_share(own_seed_share_bytes.clone())
             }
             SeedGenerationState::SeedGenerationFailed => {
                 eprintln!(
@@ -355,7 +351,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 );
                 // Seed generation failed, can't produce coins cryptographically.
                 // Fallback will be used by HBBFT if it calls get_coin_for_round_fallback.
-                (None, None)
+                CoinOutput::empty()
             }
         }
     }
@@ -366,7 +362,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
         round: AbaRound, // HBBFT round for a derived coin
         share_content: CoinShare,
         sender_hbbft_id: Self::NodeId,
-    ) -> Option<bool> {
+    ) -> CoinOutput {
         let hbbft_epoch_round_key = (epoch, round);
         let sender_frost_id = match self
             .node_id_to_frost_id
@@ -378,7 +374,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                     "[SeedCoin] Received share from unknown HBBFT NodeId for SEED gen: \
                      {sender_hbbft_id:?}",
                 );
-                return None;
+                return CoinOutput::empty();
             }
         };
 
@@ -388,15 +384,15 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 .reconstructed_derived_coins
                 .get(&hbbft_epoch_round_key)
             {
-                return Some(value);
+                return CoinOutput::with_value(value);
             }
             let value = Self::derive_coin_from_seed(seed, epoch, round);
             self.reconstructed_derived_coins
                 .insert(hbbft_epoch_round_key, value);
-            return Some(value);
+            return CoinOutput::with_value(value);
         }
         if matches!(self.seed_generation_state, SeedGenerationState::SeedGenerationFailed) {
-            return None; // Fallback will be used by HBBFT
+            return CoinOutput::empty(); // Fallback will be used by HBBFT
         }
 
         // --- Logic for SEED Generation Phases ---
@@ -415,7 +411,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 // initiator. For now, let's assume request_coin_value is called
                 // first on self.
                 self.seed_generation_state = SeedGenerationState::SeedGenerationFailed; // Mark as failed due to odd state
-                return None;
+                return CoinOutput::empty();
             }
             SeedGenerationState::AwaitingSeedCommitments {
                 own_seed_nonces,
@@ -430,7 +426,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                         "[SeedCoin] Received SEED commitment from non-participant FROST ID: \
                          {sender_frost_id:?}",
                     );
-                    return None; // Do not update state based on non-participant
+                    return CoinOutput::empty(); // Do not update state based on non-participant
                 }
 
                 // For secp256k1, a compressed point (NonceCommitment) is 33 bytes.
@@ -443,7 +439,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                         share_content.len(),
                         2 * COMMITMENT_LEN
                     );
-                    return None;
+                    return CoinOutput::empty();
                 }
                 let hiding_bytes: [u8; COMMITMENT_LEN] = share_content[0..COMMITMENT_LEN]
                     .try_into()
@@ -456,7 +452,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                     Ok(hc) => hc,
                     Err(e) => {
                         eprintln!("[SeedCoin] Failed to deserialize hiding commitment: {e:?}");
-                        return None;
+                        return CoinOutput::empty();
                     }
                 };
                 let binding_commitment = match round1::NonceCommitment::deserialize(&binding_bytes)
@@ -464,7 +460,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                     Ok(bc) => bc,
                     Err(e) => {
                         eprintln!("[SeedCoin] Failed to deserialize binding commitment: {e:?}");
-                        return None;
+                        return CoinOutput::empty();
                     }
                 };
                 let commitment =
@@ -542,7 +538,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                                 self.hbbft_own_id, e
                             );
                             self.seed_generation_state = SeedGenerationState::SeedGenerationFailed;
-                            return None;
+                            return CoinOutput::empty();
                         }
                     }
                 } else {
@@ -553,7 +549,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                         received_seed_commitments,
                     };
                 }
-                return None; // No coin decided yet
+                return CoinOutput::empty(); // No coin decided yet
             }
             SeedGenerationState::AwaitingSeedShares {
                 seed_signing_package,
@@ -570,14 +566,14 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                         "[SeedCoin] Received SEED share from non-participant FROST ID: \
                          {sender_frost_id:?}"
                     );
-                    return None; // Do not update state based on non-participant
+                    return CoinOutput::empty(); // Do not update state based on non-participant
                 }
 
                 let sig_share = match round2::SignatureShare::deserialize(&share_content) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("[SeedCoin] Failed to deserialize SEED share: {e:?}");
-                        return None;
+                        return CoinOutput::empty();
                     }
                 };
                 received_seed_shares.insert(sender_frost_id, sig_share);
@@ -616,7 +612,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                                 Self::derive_coin_from_seed(&shared_seed, epoch, round);
                             self.reconstructed_derived_coins
                                 .insert(hbbft_epoch_round_key, derived_coin_value);
-                            return Some(derived_coin_value);
+                            return CoinOutput::with_value(derived_coin_value);
                         }
                         Err(e) => {
                             eprintln!(
@@ -625,7 +621,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                                 self.hbbft_own_id
                             );
                             self.seed_generation_state = SeedGenerationState::SeedGenerationFailed;
-                            return None;
+                            return CoinOutput::empty();
                         }
                     }
                 } else {
@@ -637,11 +633,11 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                         received_seed_shares,
                     };
                 }
-                return None; // No coin decided yet
+                return CoinOutput::empty(); // No coin decided yet
             }
             _ => { /* SeedGenerated or SeedGenerationFailed, already handled at top */ }
         }
-        None
+        CoinOutput::empty()
     }
 
     fn get_coin_for_round_fallback(&mut self, epoch: EpochNum, round: AbaRound) -> bool {
@@ -862,10 +858,13 @@ pub fn run_seed_coin_integration_scenario() {
         .take(n_hbbft)
     {
         println!("[Scenario] Node {i} requesting (triggers seed commitment)...");
-        let (share_opt, val_opt) = coin.request_coin_value(epoch_seed_gen, round_seed_gen);
-        assert!(share_opt.is_some(), "Node {i} should produce a SEED commitment share");
-        assert!(val_opt.is_none(), "SEED should not be generated yet by Node {i}");
-        seed_commitments_shares.push(share_opt.unwrap());
+        let output = coin.request_coin_value(epoch_seed_gen, round_seed_gen);
+        assert!(
+            output.share_to_broadcast.is_some(),
+            "Node {i} should produce a SEED commitment share"
+        );
+        assert!(output.decided_value.is_none(), "SEED should not be generated yet by Node {i}");
+        seed_commitments_shares.push(output.share_to_broadcast.unwrap());
     }
     println!("[Scenario] All nodes produced SEED commitment shares.");
 
@@ -906,13 +905,16 @@ pub fn run_seed_coin_integration_scenario() {
         .take(n_hbbft)
     {
         println!("[Scenario] Node {i} requesting (triggers seed signature share)...");
-        let (share_opt, val_opt) = coin.request_coin_value(epoch_seed_gen, round_seed_gen);
-        assert!(share_opt.is_some(), "Node {i} should produce a SEED signature share");
+        let output = coin.request_coin_value(epoch_seed_gen, round_seed_gen);
         assert!(
-            val_opt.is_none(),
+            output.share_to_broadcast.is_some(),
+            "Node {i} should produce a SEED signature share"
+        );
+        assert!(
+            output.decided_value.is_none(),
             "SEED should not be generated yet by Node {i} after only its own share",
         );
-        seed_signature_shares.push(share_opt.unwrap());
+        seed_signature_shares.push(output.share_to_broadcast.unwrap());
     }
     println!("[Scenario] All nodes produced SEED signature shares.");
 
@@ -942,7 +944,7 @@ pub fn run_seed_coin_integration_scenario() {
             }
 
             println!("[Scenario] Node {i} submitting Node {j}'s SEED signature share...");
-            let val_opt = coin.submit_coin_share(
+            let output = coin.submit_coin_share(
                 epoch_seed_gen,
                 round_seed_gen, // HBBFT's target coin
                 seed_signature_shares[j].clone(),
@@ -950,7 +952,7 @@ pub fn run_seed_coin_integration_scenario() {
             );
             shares_submitted_count += 1;
 
-            if let Some(val) = val_opt {
+            if let Some(val) = output.decided_value {
                 println!("[Scenario] Node {i} generated SEED and derived coin value: {val}!");
                 if final_seed_derived_coin.is_none() {
                     final_seed_derived_coin = Some(val);
@@ -973,8 +975,8 @@ pub fn run_seed_coin_integration_scenario() {
         // After node i received all other shares, if it hasn't decided, it should now.
         // Or if it decided earlier, this call should just return the cached derived
         // coin.
-        let (_, current_val_opt) = coin.request_coin_value(epoch_seed_gen, round_seed_gen);
-        if let Some(val) = current_val_opt {
+        let output = coin.request_coin_value(epoch_seed_gen, round_seed_gen);
+        if let Some(val) = output.decided_value {
             if final_seed_derived_coin.is_none() {
                 // Should not happen if threshold logic correct
                 final_seed_derived_coin = Some(val);
@@ -1006,13 +1008,16 @@ pub fn run_seed_coin_integration_scenario() {
     let mut derived_coins_map = HashMap::new();
 
     for i in 0..n_hbbft {
-        let (share_opt, val_opt) = coins[i].request_coin_value(epoch_derived, round_derived);
-        assert!(share_opt.is_none(), "No share should be produced for derived coin by Node {i}");
-        assert!(val_opt.is_some(), "Derived coin should be available for Node {i}");
-        derived_coins_map.insert(hbbft_node_ids[i], val_opt.unwrap());
+        let output = coins[i].request_coin_value(epoch_derived, round_derived);
+        assert!(
+            output.share_to_broadcast.is_none(),
+            "No share should be produced for derived coin by Node {i}"
+        );
+        assert!(output.decided_value.is_some(), "Derived coin should be available for Node {i}");
+        derived_coins_map.insert(hbbft_node_ids[i], output.decided_value.unwrap());
         println!(
             "[Scenario] Node {i} derived coin for ({epoch_derived},{round_derived}): {}",
-            val_opt.unwrap()
+            output.decided_value.unwrap()
         );
     }
 
@@ -1110,9 +1115,9 @@ pub fn run_seed_coin_fallback_scenario() {
 
     // Node 0 requests, initiates seed generation but doesn't complete it
     println!("[Scenario] Node 0 requesting (initiates seed commitment)...");
-    let (share_opt, val_opt) = coin0.request_coin_value(epoch_fallback, round_fallback);
-    assert!(share_opt.is_some(), "Should produce seed commitment share");
-    assert!(val_opt.is_none(), "Coin should be undecided");
+    let output = coin0.request_coin_value(epoch_fallback, round_fallback);
+    assert!(output.share_to_broadcast.is_some(), "Should produce seed commitment share");
+    assert!(output.decided_value.is_none(), "Coin should be undecided");
 
     println!(
         "[Scenario] Simulating timeout, Node 0 calls get_coin_for_round_fallback for \
@@ -1125,13 +1130,17 @@ pub fn run_seed_coin_fallback_scenario() {
     );
 
     // Verify subsequent call to request returns the fallback if seed still not made
-    let (_, val_opt_after) = coin0.request_coin_value(epoch_fallback, round_fallback);
+    let output_after = coin0.request_coin_value(epoch_fallback, round_fallback);
     // State might still be AwaitingSeedCommitments or AwaitingSeedShares, so it
     // might still return its share The value, however, should be the fallback
     // value *if HBBFT calls get_coin_for_round_fallback* and this
     // instance caches that fallback decision for the specific (epoch,round).
     // Let's refine: get_coin_for_round_fallback *does* cache its result.
-    assert_eq!(val_opt_after, Some(fallback_val0), "After fallback, value should be cached");
+    assert_eq!(
+        output_after.decided_value,
+        Some(fallback_val0),
+        "After fallback, value should be cached"
+    );
 
     // Now, create another coin instance and have it go to fallback for the same
     // HBBFT epoch/round

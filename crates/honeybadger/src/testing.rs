@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::aba::CommonCoin;
 use crate::config::{CoinFactory, HoneyBadgerConfig, HoneyBadgerConfigBuilder};
-use crate::types::{CoinShare, NodeIdentifier};
+use crate::types::{CoinOutput, CoinShare, NodeIdentifier};
 use crate::{
     AbaRound, DecidedBatch, EpochNum, HbbftError, HbbftProcessOutput, HoneyBadgerBft,
     HoneyBadgerMessage, TimerExpiry, TimerRequest, Transaction,
@@ -19,12 +19,12 @@ pub struct DummyCommonCoin;
 
 impl CommonCoin for DummyCommonCoin {
     type NodeId = usize;
-    fn request_coin_value(
-        &mut self,
-        _epoch: EpochNum,
-        round: AbaRound,
-    ) -> (Option<CoinShare>, Option<bool>) {
-        (None, Some(round % 2 == 0)) // No shares to send, coin is immediately known
+    fn request_coin_value(&mut self, _epoch: EpochNum, round: AbaRound) -> CoinOutput {
+        // No shares to send, coin is immediately known
+        CoinOutput {
+            share_to_broadcast: None,
+            decided_value: Some(round % 2 == 0),
+        }
     }
 
     fn submit_coin_share(
@@ -33,8 +33,12 @@ impl CommonCoin for DummyCommonCoin {
         _round: AbaRound,
         _share_content: CoinShare,
         _sender_id: Self::NodeId,
-    ) -> Option<bool> {
-        None // Dummy coin doesn't process shares
+    ) -> CoinOutput {
+        // Dummy coin doesn't process shares or decide based on them
+        CoinOutput {
+            share_to_broadcast: None,
+            decided_value: None,
+        }
     }
 
     fn get_coin_for_round_fallback(&mut self, _epoch: EpochNum, round: AbaRound) -> bool {
@@ -64,14 +68,13 @@ impl<NodeId> MockInteractiveCoin<NodeId> {
 
 impl<NodeId: NodeIdentifier> CommonCoin for MockInteractiveCoin<NodeId> {
     type NodeId = NodeId;
-    fn request_coin_value(
-        &mut self,
-        _epoch: EpochNum,
-        round: AbaRound,
-    ) -> (Option<CoinShare>, Option<bool>) {
+    fn request_coin_value(&mut self, _epoch: EpochNum, round: AbaRound) -> CoinOutput {
         // Generate a unique "share" for this node and round
         let own_share = format!("share_ep{}_r{}_id{}", _epoch, round, self.own_id).into_bytes();
-        (Some(own_share), None) // No immediate decision, shares must be exchanged
+        CoinOutput {
+            share_to_broadcast: Some(own_share),
+            decided_value: None, // No immediate decision, shares must be exchanged
+        }
     }
 
     fn submit_coin_share(
@@ -80,18 +83,23 @@ impl<NodeId: NodeIdentifier> CommonCoin for MockInteractiveCoin<NodeId> {
         round: AbaRound,
         _share_content: CoinShare, // We don't inspect the content for this mock
         sender_id: NodeId,
-    ) -> Option<bool> {
+    ) -> CoinOutput {
         let shares_for_this_round = self
             .received_shares_for_round
             .entry(round)
             .or_default();
         shares_for_this_round.insert(sender_id);
 
-        if shares_for_this_round.len() >= self.config.low_threshold() {
+        let decided_value = if shares_for_this_round.len() >= self.config.low_threshold() {
             // F+1 shares
             Some(round % 2 == 0) // Deterministic coin outcome
         } else {
             None // Not enough shares yet
+        };
+
+        CoinOutput {
+            share_to_broadcast: None, // submit_coin_share in this mock doesn't trigger new shares
+            decided_value,
         }
     }
 

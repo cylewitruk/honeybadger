@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::config::HoneyBadgerConfig;
 use crate::types::{
-    AbaMessage, AbaMessageContent, AbaProcessOutput, AbaRound, CoinShare, EpochNum, TimerRequest,
+    AbaMessage, AbaMessageContent, AbaProcessOutput, AbaRound, CoinOutput, CoinShare, EpochNum,
+    TimerRequest,
 };
 use crate::{HbbftError, NodeIdentifier};
 
@@ -45,11 +46,7 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
     /// ## Notes
     ///
     /// - This method should not block.
-    fn request_coin_value(
-        &mut self,
-        epoch: EpochNum,
-        round: AbaRound,
-    ) -> (Option<CoinShare>, Option<bool>);
+    fn request_coin_value(&mut self, epoch: EpochNum, round: AbaRound) -> CoinOutput;
 
     /// Called by ABA to pass a received coin share message.
     /// Returns the coin value if this share (and others previously received)
@@ -60,7 +57,7 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
         round: AbaRound,
         share_content: CoinShare, // The content of the received coin share.
         sender_id: Self::NodeId,  // ID of the node that sent this share.
-    ) -> Option<bool>;
+    ) -> CoinOutput;
 
     /// Called when an ABA round has timed out and a coin value is mandatorily
     /// needed to proceed to the next round. This method *must* return a
@@ -320,12 +317,29 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
                     // DbgPrint!("[ABA ({},{},R{})] Received CoinShare for waiting round {} from
                     // {}", self.batch_proposer_id, self.epoch, self.current_round,
                     // round, sender_id);
-                    if let Some(coin_value) = self.coin.submit_coin_share(
+                    let coin_submit_output = self.coin.submit_coin_share(
                         self.epoch,
                         *round,
                         share.clone(), // CoinShare is Vec<u8>, cheap to clone
                         sender_id,
-                    ) {
+                    );
+
+                    if let Some(share_to_send_by_coin) = coin_submit_output.share_to_broadcast {
+                        output
+                            .messages_to_send
+                            .push(AbaMessage {
+                                pub_batch_proposer_id: self.batch_proposer_id,
+                                pub_epoch: self.epoch,
+                                pub_content: AbaMessageContent::Coin {
+                                    share: share_to_send_by_coin,
+                                    round: *round, /* Assuming coin's internal round maps to ABA
+                                                    * round */
+                                },
+                                pub_sender_id: self.own_id,
+                            });
+                    }
+
+                    if let Some(coin_value) = coin_submit_output.decided_value {
                         // DbgPrint!("[ABA ({},{},R{})] Coin decided via share: {}. Starting next
                         // round.", self.batch_proposer_id, self.epoch,
                         // self.current_round, coin_value);
@@ -333,8 +347,6 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
                         return self.start_next_round(Some(coin_value)); // Return directly
                     }
                     // Else, still waiting for more shares for this round.
-                    // No new messages or timer changes from just one share
-                    // unless it completes the coin.
                 }
             }
         }
@@ -463,11 +475,11 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
                     );
                     // self.batch_proposer_id, self.epoch, round, current_conf_values, round);
 
-                    let (own_share_opt, coin_now_opt) = self
+                    let coin_request_output = self
                         .coin
                         .request_coin_value(self.epoch, round);
 
-                    if let Some(share_to_send) = own_share_opt {
+                    if let Some(share_to_send) = coin_request_output.share_to_broadcast {
                         output
                             .messages_to_send
                             .push(AbaMessage {
@@ -481,7 +493,7 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
                             });
                     }
 
-                    if let Some(coin_value) = coin_now_opt {
+                    if let Some(coin_value) = coin_request_output.decided_value {
                         // DbgPrint!("[ABA ({},{},R{})] Coin immediately available: {}. Starting
                         // next round.", self.batch_proposer_id, self.epoch, round, coin_value);
                         return self.start_next_round(Some(coin_value));

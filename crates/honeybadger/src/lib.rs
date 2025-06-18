@@ -14,7 +14,7 @@ pub use config::{CoinFactory, HoneyBadgerConfig, HoneyBadgerConfigBuilder};
 pub use error::HbbftError;
 pub use hbbft::HoneyBadgerBft;
 // Message content types, public if users need to inspect message details
-pub use types::{AbaMessage, AbaMessageContent, RbcMessage, RbcMessageContent};
+pub use types::{AbaMessage, AbaMessageContent, CoinOutput, RbcMessage, RbcMessageContent};
 // Primary input/output types for the HBBFT state machine
 pub use types::{
     AbaRound, // Though less common for direct use, it's part of TimerRequest

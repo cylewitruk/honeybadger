@@ -43,8 +43,8 @@ use frost_secp256k1::{
     round2,
 };
 use honeybadger::{
-    AbaRound, CoinShare, EpochNum, HbbftError, HoneyBadgerConfig, HoneyBadgerConfigBuilder,
-    NodeIdentifier,
+    AbaRound, CoinOutput, CoinShare, EpochNum, HbbftError, HoneyBadgerConfig,
+    HoneyBadgerConfigBuilder, NodeIdentifier,
 };
 // Assuming the main honeybadger library is a dependency
 use honeybadger::{CoinFactory, CommonCoin};
@@ -237,15 +237,11 @@ impl<NodeId: NodeIdentifier> FrostThresholdCoin<NodeId> {
 impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
     type NodeId = NodeId;
 
-    fn request_coin_value(
-        &mut self,
-        epoch: EpochNum,
-        round: AbaRound,
-    ) -> (Option<CoinShare>, Option<bool>) {
+    fn request_coin_value(&mut self, epoch: EpochNum, round: AbaRound) -> CoinOutput {
         let coin_key = (epoch, round);
 
         if let Some(&value) = self.reconstructed_coins.get(&coin_key) {
-            return (None, Some(value));
+            return CoinOutput::with_value(value);
         }
 
         if !self
@@ -273,7 +269,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
                                     // operation have ended.
                                     self.reconstructed_coins
                                         .insert(coin_key, coin_value);
-                                    return (None, Some(coin_value)); // No share from non-participant
+                                    return CoinOutput::with_value(coin_value);
                                 }
                                 Err(e) => {
                                     eprintln!(
@@ -291,7 +287,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
                     }
                 }
             }
-            return (None, None);
+            return CoinOutput::empty(); // No share to broadcast, coin undecided
         }
 
         let own_nonces_val = self
@@ -316,7 +312,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
             let signing_package = match self.get_signing_package_for_coin(epoch, round) {
                 Ok(sp) => sp,
                 Err(_) => {
-                    return (None, None);
+                    return CoinOutput::empty(); // No share to broadcast, coin undecided;
                 }
             };
             round2::sign(
@@ -330,7 +326,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[FrostCoin] Error generating own signature share: {e:?}");
-                return (None, None);
+                return CoinOutput::empty(); // No share to broadcast, coin undecided;
             }
         };
 
@@ -380,7 +376,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
                 }
             }
         }
-        (Some(own_share_bytes), coin_value_now)
+        CoinOutput::new(Some(own_share_bytes), coin_value_now)
     }
 
     fn submit_coin_share(
@@ -389,11 +385,11 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
         round: AbaRound,
         share_content: CoinShare,
         sender_hbbft_id: Self::NodeId,
-    ) -> Option<bool> {
+    ) -> CoinOutput {
         let coin_key = (epoch, round);
 
         if let Some(&value) = self.reconstructed_coins.get(&coin_key) {
-            return Some(value);
+            return CoinOutput::with_value(value);
         }
 
         let sender_frost_id = match self
@@ -405,7 +401,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
                 eprintln!(
                     "[FrostCoin] Received share from unknown HBBFT NodeId: {sender_hbbft_id:?}"
                 );
-                return None;
+                return CoinOutput::empty();
             }
         };
 
@@ -416,15 +412,13 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
             eprintln!(
                 "[FrostCoin] Received share from non-participant FROST ID: {sender_frost_id:?}"
             );
-            return None;
+            return CoinOutput::empty();
         }
 
         // A frost_secp256k1::SignatureShare serializes to just its Scalar component.
         eprintln!(
-            "[FrostCoin DEBUG] submit_coin_share from HBBFT ID {:?}, FROST ID {:?}: \
-             share_content.len() = {}",
-            sender_hbbft_id,
-            sender_frost_id,
+            "[FrostCoin DEBUG] submit_coin_share from HBBFT ID {sender_hbbft_id:?}, FROST ID \
+             {sender_frost_id:?}: share_content.len() = {}",
             share_content.len()
         );
         let sig_share_array: [u8; 32] = match share_content.try_into() {
@@ -432,7 +426,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
             Ok(arr) => arr,
             Err(_) => {
                 eprintln!("[FrostCoin] Invalid share content length");
-                return None;
+                return CoinOutput::empty();
             }
         };
 
@@ -440,7 +434,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[FrostCoin] Failed to deserialize signature share: {e:?}");
-                return None;
+                return CoinOutput::empty();
             }
         };
 
@@ -468,7 +462,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
                                 // have ended.
                                 self.reconstructed_coins
                                     .insert(coin_key, value);
-                                return Some(value);
+                                return CoinOutput::with_value(value);
                             }
                             Err(e) => {
                                 eprintln!("[FrostCoin] Aggregation failed after submit: {e:?}");
@@ -484,7 +478,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
                 }
             }
         }
-        None
+        CoinOutput::empty()
     }
 
     fn get_coin_for_round_fallback(&mut self, epoch: EpochNum, round: AbaRound) -> bool {
@@ -691,25 +685,27 @@ pub fn run_integration_scenario() {
     let round: AbaRound = 0;
 
     println!("Node 0 requesting coin value...");
-    let (share0_opt, val0_opt) = coin0.request_coin_value(epoch, round);
-    assert!(share0_opt.is_some(), "Node 0 should produce a share");
-    assert!(val0_opt.is_none(), "Coin should not be decided with one share yet");
-    let share0_bytes = share0_opt.unwrap();
+    let output0 = coin0.request_coin_value(epoch, round);
+    assert!(output0.share_to_broadcast.is_some(), "Node 0 should produce a share");
+    assert!(output0.decided_value.is_none(), "Coin should not be decided with one share yet");
+    let share0_bytes = output0.share_to_broadcast.unwrap();
     println!("Node 0 produced share. Coin undecided.");
 
     println!("Node 1 requesting coin value...");
-    let (share1_opt, val1_opt) = coin1.request_coin_value(epoch, round);
-    assert!(share1_opt.is_some(), "Node 1 should produce a share");
+    let output1 = coin1.request_coin_value(epoch, round);
+    assert!(output1.share_to_broadcast.is_some(), "Node 1 should produce a share");
     assert!(
-        val1_opt.is_none(),
+        output1.decided_value.is_none(),
         "Coin should not be decided with one share yet (from its perspective)"
     );
-    let share1_bytes = share1_opt.unwrap();
+    let share1_bytes = output1.share_to_broadcast.unwrap();
     println!("Node 1 produced share. Coin undecided.");
 
     println!("Node 0 submitting Node 1's share...");
-    let val_at_node0_after_share1 =
-        coin0.submit_coin_share(epoch, round, share1_bytes.clone(), hbbft_node_ids[1]);
+    let CoinOutput {
+        decided_value: val_at_node0_after_share1,
+        ..
+    } = coin0.submit_coin_share(epoch, round, share1_bytes.clone(), hbbft_node_ids[1]);
     assert!(
         val_at_node0_after_share1.is_some(),
         "Node 0 should decide coin after receiving Node 1's share"
@@ -718,8 +714,10 @@ pub fn run_integration_scenario() {
     println!("Node 0 decided coin value: {decided_value_at_0}");
 
     println!("Node 1 submitting Node 0's share...");
-    let val_at_node1_after_share0 =
-        coin1.submit_coin_share(epoch, round, share0_bytes.clone(), hbbft_node_ids[0]);
+    let CoinOutput {
+        decided_value: val_at_node1_after_share0,
+        ..
+    } = coin1.submit_coin_share(epoch, round, share0_bytes.clone(), hbbft_node_ids[0]);
     assert!(
         val_at_node1_after_share0.is_some(),
         "Node 1 should decide coin after receiving Node 0's share"
@@ -733,9 +731,14 @@ pub fn run_integration_scenario() {
     );
     println!("SUCCESS: Both nodes decided on the same value: {decided_value_at_0}");
 
-    let (share0_again_opt, val0_again_opt) = coin0.request_coin_value(epoch, round);
-    assert!(share0_again_opt.is_none(), "Node 0 should not produce a new share if decided");
-    assert_eq!(val0_again_opt, Some(decided_value_at_0));
+    let output0_again = coin0.request_coin_value(epoch, round);
+    assert!(
+        output0_again
+            .share_to_broadcast
+            .is_none(),
+        "Node 0 should not produce a new share if decided"
+    );
+    assert_eq!(output0_again.decided_value, Some(decided_value_at_0));
     println!("Node 0 subsequent request returns cached value.");
 }
 
@@ -823,22 +826,24 @@ pub fn run_fallback_scenario() {
     let round: AbaRound = 3;
 
     println!("Node 0 requesting coin (epoch {epoch}, round {round})...");
-    let (share_opt, val_opt) = coin0.request_coin_value(epoch, round);
-    assert!(share_opt.is_some(), "Node 0 should produce a share for fallback test");
-    assert!(val_opt.is_none(), "Coin should be undecided initially in fallback test");
+    let output = coin0.request_coin_value(epoch, round);
+    assert!(output.share_to_broadcast.is_some(), "Node 0 should produce a share for fallback test");
+    assert!(output.decided_value.is_none(), "Coin should be undecided initially in fallback test");
     println!("Node 0 produced share. Coin undecided.");
 
     println!("Simulating ABA timeout, Node 0 calls get_coin_for_round_fallback...");
     let fallback_val = coin0.get_coin_for_round_fallback(epoch, round);
     println!("Node 0 fallback value: {fallback_val}");
 
-    let (share_after_fallback_opt, val_after_fallback_opt) = coin0.request_coin_value(epoch, round);
+    let output_after_fallback = coin0.request_coin_value(epoch, round);
     assert!(
-        share_after_fallback_opt.is_none(),
+        output_after_fallback
+            .share_to_broadcast
+            .is_none(),
         "No new share should be produced after fallback decision"
     );
     assert_eq!(
-        val_after_fallback_opt,
+        output_after_fallback.decided_value,
         Some(fallback_val),
         "Subsequent request should return cached fallback value"
     );
@@ -893,11 +898,13 @@ pub fn main() {
     match args[1].as_str() {
         "integration" => run_integration_scenario(),
         "fallback" => run_fallback_scenario(),
-        "seed-integration" => frost_seed::run_seed_coin_integration_scenario(),
-        "seed-fallback" => frost_seed::run_seed_coin_fallback_scenario(),
+        "seeded-integration" => frost_seed::run_seed_coin_integration_scenario(),
+        "seeded-fallback" => frost_seed::run_seed_coin_fallback_scenario(),
         _ => {
             println!("Unknown scenario: {}", args[1]);
-            println!("Available scenarios: integration, fallback, seed-integration, seed-fallback");
+            println!(
+                "Available scenarios: integration, fallback, seeded-integration, seeded-fallback"
+            );
         }
     }
 }

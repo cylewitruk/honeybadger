@@ -131,6 +131,70 @@ pub struct CoinOutput {
     // Future consideration: Could also include coin-specific timer requests.
 }
 
+impl CoinOutput {
+    pub fn empty() -> Self {
+        CoinOutput::default()
+    }
+
+    pub fn new<S, V>(share: S, value: V) -> Self
+    where
+        S: Into<Option<CoinShare>>,
+        V: Into<Option<bool>>,
+    {
+        CoinOutput {
+            share_to_broadcast: share.into(),
+            decided_value: value.into(),
+        }
+    }
+
+    /// Creates a `CoinOutput` with the `share_to_broadcast` field set from the
+    /// input, and `decided_value` set to `None`.
+    ///
+    /// The `share_input` can be either a direct `CoinShare` or an
+    /// `Option<CoinShare>`.
+    pub fn with_share<S>(share_input: S) -> Self
+    where
+        S: Into<Option<CoinShare>>,
+    {
+        CoinOutput {
+            share_to_broadcast: share_input.into(),
+            decided_value: None,
+        }
+    }
+
+    /// Creates a `CoinOutput` with the `decided_value` field set from the
+    /// input, and `share_to_broadcast` set to `None`.
+    ///
+    /// The `value_input` can be either a direct `bool` or an `Option<bool>`.
+    pub fn with_value<V>(value_input: V) -> Self
+    where
+        V: Into<Option<bool>>,
+    {
+        CoinOutput {
+            share_to_broadcast: None,
+            decided_value: value_input.into(),
+        }
+    }
+
+    /// Updates the `CoinOutput` with a new share to broadcast.
+    pub fn and_share<S>(mut self, share_input: S) -> Self
+    where
+        S: Into<Option<CoinShare>>,
+    {
+        self.share_to_broadcast = share_input.into();
+        self
+    }
+
+    /// Updates the `CoinOutput` with a new decided value.
+    pub fn and_value<V>(mut self, value_input: V) -> Self
+    where
+        V: Into<Option<bool>>,
+    {
+        self.decided_value = value_input.into();
+        self
+    }
+}
+
 // =============================================================================
 // MESSAGE TYPES
 // =============================================================================
