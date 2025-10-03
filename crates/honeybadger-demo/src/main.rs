@@ -250,40 +250,38 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
         {
             // If this node is not a designated participant, it doesn't produce a share.
             // It can only return a decided coin if it has already received enough shares.
-            if let Some(shares_for_coin_map) = self.received_sig_shares.get(&coin_key) {
-                if shares_for_coin_map.len() >= self.min_signers as usize {
-                    // Attempt to aggregate only if enough shares are present
-                    match self.get_signing_package_for_coin(epoch, round) {
-                        // Immutable borrow of self
-                        Ok(signing_package) => {
-                            match frost::aggregate(
-                                // Immutable borrow of self for group_public_key_package
-                                &signing_package,
-                                shares_for_coin_map, // Use the immutable map
-                                &self.group_public_key_package,
-                            ) {
-                                Ok(group_signature) => {
-                                    let coin_value =
-                                        Self::derive_bool_from_signature(&group_signature);
-                                    // This mutable borrow is fine as other borrows for this
-                                    // operation have ended.
-                                    self.reconstructed_coins
-                                        .insert(coin_key, coin_value);
-                                    return CoinOutput::with_value(coin_value);
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[FrostCoin] Aggregation failed for non-participant: {e:?}"
-                                    );
-                                }
+            if let Some(shares_for_coin_map) = self.received_sig_shares.get(&coin_key)
+                && shares_for_coin_map.len() >= self.min_signers as usize
+            {
+                // Attempt to aggregate only if enough shares are present
+                match self.get_signing_package_for_coin(epoch, round) {
+                    // Immutable borrow of self
+                    Ok(signing_package) => {
+                        match frost::aggregate(
+                            // Immutable borrow of self for group_public_key_package
+                            &signing_package,
+                            shares_for_coin_map, // Use the immutable map
+                            &self.group_public_key_package,
+                        ) {
+                            Ok(group_signature) => {
+                                let coin_value = Self::derive_bool_from_signature(&group_signature);
+                                // This mutable borrow is fine as other borrows for this
+                                // operation have ended.
+                                self.reconstructed_coins
+                                    .insert(coin_key, coin_value);
+                                return CoinOutput::with_value(coin_value);
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[FrostCoin] Aggregation failed for non-participant: {e:?}"
+                                );
                             }
                         }
-                        Err(e) => {
-                            eprintln!(
-                                "[FrostCoin] Failed to get signing package for non-participant: \
-                                 {e:?}"
-                            );
-                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[FrostCoin] Failed to get signing package for non-participant: {e:?}"
+                        );
                     }
                 }
             }
@@ -346,33 +344,31 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
 
         let mut coin_value_now: Option<bool> = None;
         // Now, access self.received_sig_shares immutably.
-        if let Some(current_shares_map) = self.received_sig_shares.get(&coin_key) {
-            if current_shares_map.len() >= self.min_signers as usize {
-                match self.get_signing_package_for_coin(epoch, round) {
-                    Ok(signing_package) => {
-                        match frost::aggregate(
-                            &signing_package,
-                            current_shares_map, // Pass the immutable reference
-                            &self.group_public_key_package,
-                        ) {
-                            Ok(group_signature) => {
-                                let value = Self::derive_bool_from_signature(&group_signature);
-                                // This mutable borrow is fine as other borrows for this operation
-                                // have ended.
-                                self.reconstructed_coins
-                                    .insert(coin_key, value);
-                                coin_value_now = Some(value);
-                            }
-                            Err(e) => {
-                                eprintln!("[FrostCoin] Aggregation failed: {e:?}");
-                            }
+        if let Some(current_shares_map) = self.received_sig_shares.get(&coin_key)
+            && current_shares_map.len() >= self.min_signers as usize
+        {
+            match self.get_signing_package_for_coin(epoch, round) {
+                Ok(signing_package) => {
+                    match frost::aggregate(
+                        &signing_package,
+                        current_shares_map, // Pass the immutable reference
+                        &self.group_public_key_package,
+                    ) {
+                        Ok(group_signature) => {
+                            let value = Self::derive_bool_from_signature(&group_signature);
+                            // This mutable borrow is fine as other borrows for this operation
+                            // have ended.
+                            self.reconstructed_coins
+                                .insert(coin_key, value);
+                            coin_value_now = Some(value);
+                        }
+                        Err(e) => {
+                            eprintln!("[FrostCoin] Aggregation failed: {e:?}");
                         }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "[FrostCoin] Error getting signing package for aggregation: {e:?}"
-                        );
-                    }
+                }
+                Err(e) => {
+                    eprintln!("[FrostCoin] Error getting signing package for aggregation: {e:?}");
                 }
             }
         }
@@ -445,36 +441,36 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
             .insert(sender_frost_id, sig_share);
 
         // Now, access self.received_sig_shares immutably.
-        if let Some(current_shares_map) = self.received_sig_shares.get(&coin_key) {
-            if current_shares_map.len() >= self.min_signers as usize {
-                // Immutable borrows of self for get_signing_package_for_coin and
-                // group_public_key_package are now safe.
-                match self.get_signing_package_for_coin(epoch, round) {
-                    Ok(signing_package) => {
-                        match frost::aggregate(
-                            &signing_package,
-                            current_shares_map, // Pass the immutable reference
-                            &self.group_public_key_package,
-                        ) {
-                            Ok(group_signature) => {
-                                let value = Self::derive_bool_from_signature(&group_signature);
-                                // This mutable borrow is fine as other borrows for this operation
-                                // have ended.
-                                self.reconstructed_coins
-                                    .insert(coin_key, value);
-                                return CoinOutput::with_value(value);
-                            }
-                            Err(e) => {
-                                eprintln!("[FrostCoin] Aggregation failed after submit: {e:?}");
-                            }
+        if let Some(current_shares_map) = self.received_sig_shares.get(&coin_key)
+            && current_shares_map.len() >= self.min_signers as usize
+        {
+            // Immutable borrows of self for get_signing_package_for_coin and
+            // group_public_key_package are now safe.
+            match self.get_signing_package_for_coin(epoch, round) {
+                Ok(signing_package) => {
+                    match frost::aggregate(
+                        &signing_package,
+                        current_shares_map, // Pass the immutable reference
+                        &self.group_public_key_package,
+                    ) {
+                        Ok(group_signature) => {
+                            let value = Self::derive_bool_from_signature(&group_signature);
+                            // This mutable borrow is fine as other borrows for this operation
+                            // have ended.
+                            self.reconstructed_coins
+                                .insert(coin_key, value);
+                            return CoinOutput::with_value(value);
+                        }
+                        Err(e) => {
+                            eprintln!("[FrostCoin] Aggregation failed after submit: {e:?}");
                         }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "[FrostCoin] Error getting signing package for aggregation after \
-                             submit: {e:?}"
-                        );
-                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[FrostCoin] Error getting signing package for aggregation after submit: \
+                         {e:?}"
+                    );
                 }
             }
         }

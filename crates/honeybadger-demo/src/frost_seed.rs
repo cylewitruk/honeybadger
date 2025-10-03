@@ -36,7 +36,7 @@ mod testing_utils {
     pub struct DemoNodeId(pub usize);
     impl std::fmt::Display for DemoNodeId {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "Node({})", self.0)
+            write!(f, "{}", self.0)
         }
     }
     impl NodeIdentifier for DemoNodeId {}
@@ -73,12 +73,15 @@ enum SeedGenerationState {
         own_seed_nonces: Box<round1::SigningNonces>,
         own_seed_commitments: Box<round1::SigningCommitments>,
         // Received commitments from other participants for the seed signature
+        // This map will store commitments from those who have responded.
         received_seed_commitments: BTreeMap<FrostIdentifier, round1::SigningCommitments>,
     },
     AwaitingSeedShares {
         // Signing package for the seed signature (derived after all commitments are in)
         seed_signing_package: SigningPackage,
-        // Own nonces (needed again for round2::sign)
+        // The actual participants whose commitments formed this signing package.
+        actual_seed_package_participants: Vec<FrostIdentifier>,
+        // Own nonces (needed for round2::sign)
         own_seed_nonces: Box<round1::SigningNonces>,
         // Own share for the seed signature (already computed)
         own_seed_share_bytes: Option<Vec<u8>>, // To return to HBBFT if requested again
@@ -180,10 +183,12 @@ impl<NodeId: NodeIdentifier> SeedBasedFrostCoin<NodeId> {
 
     /// Constructs the SigningPackage for the SEED message once all commitments
     /// are collected.
+    /// The `commitments_map` should only contain commitments from the actual
+    /// participants.
     fn get_seed_signing_package(
         commitments_map: &BTreeMap<FrostIdentifier, round1::SigningCommitments>,
     ) -> SigningPackage {
-        SigningPackage::new(commitments_map.clone(), SEED_GENERATION_MESSAGE)
+        SigningPackage::new(commitments_map.clone(), SEED_GENERATION_MESSAGE) // clone is on BTreeMap
     }
 
     /// Generates this node's Round 2 signature share for the SEED signature.
@@ -201,27 +206,40 @@ impl<NodeId: NodeIdentifier> SeedBasedFrostCoin<NodeId> {
         &self,
         seed_signing_package: &SigningPackage,
         received_seed_shares: &BTreeMap<FrostIdentifier, round2::SignatureShare>,
+        // actual_package_participants: &[FrostIdentifier], // Used to validate shares are from
+        // expected set
     ) -> Result<Signature, HbbftError<NodeId>> {
-        // Filter shares to only include those from the actual `seed_participants`
-        // if necessary, or ensure `received_seed_shares` only contains them.
-        // For FROST, all shares in the map passed to `aggregate` must correspond to
-        // commitments in the `SigningPackage`.
+        // Build the intersection of actually received shares with the signing package
+        // and the public key package. Do not stop at threshold; pass all valid shares.
+        let package_commitments_map = seed_signing_package.signing_commitments();
+        let pubkey_verifying_shares_map = self
+            .group_public_key_package
+            .verifying_shares();
+
         let mut valid_shares_for_aggregation = BTreeMap::new();
-        for p_id in &self.seed_participants {
-            if let Some(share) = received_seed_shares.get(p_id) {
-                // Ensure the commitment for this participant is in the signing package.
-                // This should always be true if seed_signing_package was formed correctly
-                // from all seed_participants' commitments.
-                if seed_signing_package
-                    .signing_commitments()
-                    .contains_key(p_id)
-                {
-                    valid_shares_for_aggregation.insert(*p_id, *share);
-                }
+        for (id, share) in received_seed_shares {
+            if package_commitments_map.contains_key(id)
+                && pubkey_verifying_shares_map.contains_key(id)
+            {
+                valid_shares_for_aggregation.insert(*id, *share);
             }
-            if valid_shares_for_aggregation.len() >= self.min_signers_for_seed as usize {
-                break; // Optimization: only need threshold shares
-            }
+        }
+
+        let pkg_len = seed_signing_package
+            .signing_commitments()
+            .len();
+        eprintln!(
+            "[DEBUG AGGREGATE SEED SIG] Package size: {}, shares used: {}",
+            pkg_len,
+            valid_shares_for_aggregation.len()
+        );
+
+        if pkg_len != self.min_signers_for_seed as usize {
+            return Err(HbbftError::InternalError(format!(
+                "SigningPackage size mismatch: got {}, expected {}. Package must be built from \
+                 the threshold set.",
+                pkg_len, self.min_signers_for_seed
+            )));
         }
 
         if valid_shares_for_aggregation.len() < self.min_signers_for_seed as usize {
@@ -232,9 +250,49 @@ impl<NodeId: NodeIdentifier> SeedBasedFrostCoin<NodeId> {
             )));
         }
 
+        // Optional: keep the helpful diagnostics you added
+        eprintln!("[DEBUG AGGREGATE SEED SIG] Node ID: {:?}", self.hbbft_own_id);
+        eprintln!("[DEBUG AGGREGATE SEED SIG] Min signers for seed: {}", self.min_signers_for_seed);
+        eprintln!(
+            "[DEBUG AGGREGATE SEED SIG] Seed Signing Package Commitments ({}):",
+            package_commitments_map.len()
+        );
+        for (id, _) in package_commitments_map.iter() {
+            eprintln!(
+                "  - Package Committer (Serialized): {:?}, (Debug): {:?}",
+                id.serialize(),
+                id
+            );
+        }
+        eprintln!(
+            "[DEBUG AGGREGATE SEED SIG] Group Public Key Package Verifying Shares ({}):",
+            pubkey_verifying_shares_map.len()
+        );
+        for (id, _) in pubkey_verifying_shares_map.iter() {
+            eprintln!(
+                "  - PubKey Verifying Share for (Serialized): {:?}, (Debug): {:?}",
+                id.serialize(),
+                id
+            );
+        }
+        eprintln!(
+            "[DEBUG AGGREGATE SEED SIG] Valid Shares for Aggregation ({}):",
+            valid_shares_for_aggregation.len()
+        );
+        for (id, _) in valid_shares_for_aggregation.iter() {
+            eprintln!(
+                "  - Share from (Serialized): {:?}, (Debug): {:?}\n    - In Package Commitments? \
+                 : {}\n    - In PubKey Verifying Shares? : {}",
+                id.serialize(),
+                id,
+                package_commitments_map.contains_key(id),
+                pubkey_verifying_shares_map.contains_key(id),
+            );
+        }
+
         frost::aggregate(
             seed_signing_package,
-            &valid_shares_for_aggregation, // Use the map directly
+            &valid_shares_for_aggregation,
             &self.group_public_key_package,
         )
         .map_err(|e| HbbftError::InternalError(format!("FROST aggregate failed for seed: {e:?}")))
@@ -246,6 +304,14 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
 
     fn request_coin_value(&mut self, epoch: EpochNum, round: AbaRound) -> CoinOutput {
         let hbbft_epoch_round_key = (epoch, round);
+
+        // Return cached decision (from fallback or prior seed-derived coin), if any
+        if let Some(&value) = self
+            .reconstructed_derived_coins
+            .get(&hbbft_epoch_round_key)
+        {
+            return CoinOutput::with_value(value);
+        }
 
         match &self.seed_generation_state {
             SeedGenerationState::SeedGenerated(seed) => {
@@ -263,7 +329,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
             }
             SeedGenerationState::NotStarted => {
                 eprintln!(
-                    "[SeedCoin] Node {:?}: SeedGen::NotStarted. Generating seed commitments.",
+                    "[SeedCoin] Node {}: SeedGen::NotStarted. Generating seed commitments.",
                     self.hbbft_own_id
                 );
                 let (nonces, commitments) = self.generate_own_seed_commitments();
@@ -277,20 +343,17 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 };
                 // Share to send is our FROST Round 1 commitment for the SEED.
                 // Serialize hiding and binding commitments
-                let mut commitment_bytes = Vec::new();
-                commitment_bytes.extend_from_slice(
-                    &commitments
-                        .hiding()
-                        .serialize()
-                        .unwrap(),
-                );
-                commitment_bytes.extend_from_slice(
-                    &commitments
-                        .binding()
-                        .serialize()
-                        .unwrap(),
-                );
-                CoinOutput::with_share(commitment_bytes)
+                match (commitments.hiding().serialize(), commitments.binding().serialize()) {
+                    (Ok(h_bytes), Ok(b_bytes)) => {
+                        let combined_bytes: CoinShare = [h_bytes, b_bytes].concat();
+                        CoinOutput::with_share(combined_bytes)
+                    }
+                    _ => {
+                        eprintln!("[SeedCoin] Failed to serialize own initial seed commitments.");
+                        self.seed_generation_state = SeedGenerationState::SeedGenerationFailed;
+                        CoinOutput::empty()
+                    }
+                }
             }
             SeedGenerationState::AwaitingSeedCommitments {
                 own_seed_commitments, // Already sent this one
@@ -303,7 +366,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 // HBBFT expects us to return our share if we have one. If we're just
                 // awaiting, it means we already provided it.
                 eprintln!(
-                    "[SeedCoin] Node {:?}: SeedGen::AwaitingSeedCommitments ({} collected of {} \
+                    "[SeedCoin] Node {}: SeedGen::AwaitingSeedCommitments ({} collected of {} \
                      needed from {} total participants for seed). Returning own commitment again \
                      if requested.",
                     self.hbbft_own_id,
@@ -313,20 +376,26 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 );
                 // Return our commitment share again if HBBFT asks during this phase.
                 // Serialize hiding and binding commitments
-                let mut commitment_bytes = Vec::new();
-                commitment_bytes.extend_from_slice(
-                    &own_seed_commitments
+                match (
+                    own_seed_commitments
                         .hiding()
-                        .serialize()
-                        .unwrap(),
-                );
-                commitment_bytes.extend_from_slice(
-                    &own_seed_commitments
+                        .serialize(),
+                    own_seed_commitments
                         .binding()
-                        .serialize()
-                        .unwrap(),
-                );
-                CoinOutput::with_share(commitment_bytes)
+                        .serialize(),
+                ) {
+                    (Ok(h_bytes), Ok(b_bytes)) => {
+                        let combined_bytes: CoinShare = [h_bytes, b_bytes].concat();
+                        CoinOutput::with_share(combined_bytes)
+                    }
+                    _ => {
+                        eprintln!("[SeedCoin] Failed to re-serialize own seed commitments.");
+                        // Don't change state here, just fail to provide the share this time.
+                        // If it's a persistent serialization issue, SeedGenerationFailed will be
+                        // hit eventually.
+                        CoinOutput::empty()
+                    }
+                }
             }
             SeedGenerationState::AwaitingSeedShares {
                 own_seed_share_bytes, // This is the FROST Round 2 share for the SEED
@@ -334,8 +403,8 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 ..
             } => {
                 eprintln!(
-                    "[SeedCoin] Node {:?}: SeedGen::AwaitingSeedShares ({} collected of {} \
-                     needed). Returning own share if available.",
+                    "[SeedCoin] Node {}: SeedGen::AwaitingSeedShares ({} collected of {} needed). \
+                     Returning own share if available.",
                     self.hbbft_own_id,
                     received_seed_shares.len(),
                     self.min_signers_for_seed
@@ -346,7 +415,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
             }
             SeedGenerationState::SeedGenerationFailed => {
                 eprintln!(
-                    "[SeedCoin] Node {:?}: SeedGen::SeedGenerationFailed. Cannot proceed.",
+                    "[SeedCoin] Node {}: SeedGen::SeedGenerationFailed. Cannot proceed.",
                     self.hbbft_own_id
                 );
                 // Seed generation failed, can't produce coins cryptographically.
@@ -364,6 +433,15 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
         sender_hbbft_id: Self::NodeId,
     ) -> CoinOutput {
         let hbbft_epoch_round_key = (epoch, round);
+
+        // If we already have a cached decision (fallback or derived), return it.
+        if let Some(&value) = self
+            .reconstructed_derived_coins
+            .get(&hbbft_epoch_round_key)
+        {
+            return CoinOutput::with_value(value);
+        }
+
         let sender_frost_id = match self
             .node_id_to_frost_id
             .get(&sender_hbbft_id)
@@ -402,7 +480,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 // This shouldn't happen if request_coin_value was called first by this node.
                 // If another node's share arrives before this node calls request_coin_value.
                 eprintln!(
-                    "[SeedCoin] Node {:?}: Received share while in SeedGen::NotStarted. This is \
+                    "[SeedCoin] Node {}: Received share while in SeedGen::NotStarted. This is \
                      unexpected but attempting to process as commitment.",
                     self.hbbft_own_id
                 );
@@ -432,6 +510,17 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 // For secp256k1, a compressed point (NonceCommitment) is 33 bytes.
                 const COMMITMENT_LEN: usize = 33;
 
+                // This arm expects a commitment share (Round 1 for SEED)
+                if share_content.len() != 2 * COMMITMENT_LEN {
+                    eprintln!(
+                        "[SeedCoin] State AwaitingSeedCommitments: Received share with unexpected \
+                         length {} for a commitment (expected {}). Sender: {:?}",
+                        share_content.len(),
+                        2 * COMMITMENT_LEN,
+                        sender_frost_id
+                    );
+                    return CoinOutput::empty();
+                }
                 // Deserialize commitment
                 if share_content.len() != 2 * COMMITMENT_LEN {
                     eprintln!(
@@ -443,15 +532,36 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 }
                 let hiding_bytes: [u8; COMMITMENT_LEN] = share_content[0..COMMITMENT_LEN]
                     .try_into()
-                    .expect("slice with incorrect length for hiding commitment");
+                    .map_err(|_| {
+                        eprintln!(
+                            "[SeedCoin] Failed to slice hiding commitment bytes from \
+                             share_content (len {})",
+                            share_content.len()
+                        );
+                    })
+                    .unwrap_or_else(|_| {
+                        // This panic is bad for library code, should return CoinOutput::empty()
+                        // For now, keeping it to highlight the error during testing.
+                        panic!("Slice error for hiding commitment");
+                    });
                 let binding_bytes: [u8; COMMITMENT_LEN] = share_content[COMMITMENT_LEN..]
                     .try_into()
-                    .expect("slice with incorrect length for binding commitment");
+                    .map_err(|_| {
+                        eprintln!(
+                            "[SeedCoin] Failed to slice binding commitment bytes from \
+                             share_content (len {})",
+                            share_content.len()
+                        );
+                    })
+                    .unwrap_or_else(|_| {
+                        panic!("Slice error for binding commitment");
+                    });
 
                 let hiding_commitment = match round1::NonceCommitment::deserialize(&hiding_bytes) {
                     Ok(hc) => hc,
                     Err(e) => {
                         eprintln!("[SeedCoin] Failed to deserialize hiding commitment: {e:?}");
+                        // Optionally, could mark sender as misbehaving.
                         return CoinOutput::empty();
                     }
                 };
@@ -460,6 +570,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                     Ok(bc) => bc,
                     Err(e) => {
                         eprintln!("[SeedCoin] Failed to deserialize binding commitment: {e:?}");
+                        // Optionally, could mark sender as misbehaving.
                         return CoinOutput::empty();
                     }
                 };
@@ -468,7 +579,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
 
                 received_seed_commitments.insert(sender_frost_id, commitment);
                 eprintln!(
-                    "[SeedCoin] Node {:?}: SeedGen::AwaitingSeedCommitments received from {:?}. \
+                    "[SeedCoin] Node {}: SeedGen::AwaitingSeedCommitments received from {:?}. \
                      Total commitments: {} of {} needed from {} total participants for seed.",
                     self.hbbft_own_id,
                     sender_frost_id,
@@ -477,100 +588,151 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                     self.seed_participants.len()
                 );
 
-                // Ensure this node's own commitment is in the map.
-                // `own_seed_commitments` is `Copy` because `SigningCommitments` is `Copy`.
+                // Ensure our own commitment is recorded:
                 received_seed_commitments
                     .entry(self.frost_own_identifier)
                     .or_insert(*own_seed_commitments);
 
-                // Check if we have ALL commitments from seed_participants.
-                // For robust FROST, we need commitments from everyone who will be part of the
-                // SigningPackage.
-                let mut all_known_commitments_present = true;
-                for p_id in &self.seed_participants {
-                    if !received_seed_commitments.contains_key(p_id) {
-                        // Since we've ensured our own commitment is present, if any p_id is
-                        // missing here, it must be from another participant.
-                        all_known_commitments_present = false;
-                        break;
+                // Canonical signer set: first `t` in the globally sorted participant list.
+                let t = self.min_signers_for_seed as usize;
+                let canonical_signers: Vec<FrostIdentifier> = self
+                    .seed_participants
+                    .iter()
+                    .copied()
+                    .take(t)
+                    .collect();
+
+                // Only proceed when we have commitments from all canonical signers.
+                let have_all_canonical = canonical_signers
+                    .iter()
+                    .all(|pid| received_seed_commitments.contains_key(pid));
+
+                if have_all_canonical {
+                    // Build package from canonical set only (identical on all nodes).
+                    let mut valid_commitments_for_package = BTreeMap::new();
+                    for pid in &canonical_signers {
+                        valid_commitments_for_package.insert(
+                            *pid,
+                            *received_seed_commitments
+                                .get(pid)
+                                .expect("commitment present"),
+                        );
                     }
-                }
-                // For FROST, the signing package needs commitments from all listed participants
-                // in the package. We designated `seed_participants` (all N
-                // nodes) to be in this package.
-                if all_known_commitments_present {
-                    // As an assertion, ensure the counts also match. This should hold if
-                    // all_known_commitments_present is true and no extraneous entries exist.
-                    assert_eq!(
-                        received_seed_commitments.len(),
-                        self.seed_participants.len(),
-                        "Commitment count mismatch despite all_known_commitments_present being \
-                         true"
-                    );
 
                     eprintln!(
-                        "[SeedCoin] Node {:?}: All SEED commitments received. Transitioning to \
-                         AwaitingSeedShares.",
-                        self.hbbft_own_id
+                        "[SeedCoin] Node {}: Forming SEED SigningPackage with canonical \
+                         participants: {:?}",
+                        self.hbbft_own_id, canonical_signers
                     );
+
                     let seed_signing_package =
-                        Self::get_seed_signing_package(&received_seed_commitments);
+                        Self::get_seed_signing_package(&valid_commitments_for_package);
 
-                    // This node should now generate ITS OWN share for the seed.
-                    match self.generate_own_seed_share(&seed_signing_package, &own_seed_nonces) {
-                        Ok(own_share) => {
-                            let own_share_bytes_for_state = own_share.serialize().to_vec();
-                            let mut current_shares = BTreeMap::new();
-                            current_shares.insert(self.frost_own_identifier, own_share);
+                    if seed_signing_package
+                        .signing_commitments()
+                        .len()
+                        != t
+                    {
+                        eprintln!(
+                            "[SeedCoin] Node {}: SigningPackage has unexpected number of \
+                             commitments: got {}, expected {}",
+                            self.hbbft_own_id,
+                            seed_signing_package
+                                .signing_commitments()
+                                .len(),
+                            t
+                        );
+                        self.seed_generation_state = SeedGenerationState::SeedGenerationFailed;
+                        return CoinOutput::empty();
+                    }
 
-                            self.seed_generation_state = SeedGenerationState::AwaitingSeedShares {
-                                seed_signing_package,
-                                own_seed_nonces, /* Keep nonces for potential re-sign if needed
-                                                  * by protocol */
-                                own_seed_share_bytes: Some(own_share_bytes_for_state),
-                                received_seed_shares: current_shares,
-                            };
+                    // If we are in the canonical signer set, generate our Round 2 share.
+                    let mut own_seed_share_bytes: Option<Vec<u8>> = None;
+                    let mut received_seed_shares = BTreeMap::new();
+
+                    if canonical_signers.contains(&self.frost_own_identifier) {
+                        match self.generate_own_seed_share(&seed_signing_package, &own_seed_nonces)
+                        {
+                            Ok(own_share) => {
+                                own_seed_share_bytes = Some(own_share.serialize().to_vec());
+                                received_seed_shares.insert(self.frost_own_identifier, own_share);
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[SeedCoin] Node {}: Failed to generate own seed share: {:?}. \
+                                     Failing seed gen.",
+                                    self.hbbft_own_id, e
+                                );
+                                self.seed_generation_state =
+                                    SeedGenerationState::SeedGenerationFailed;
+                                return CoinOutput::empty();
+                            }
                         }
-                        Err(e) => {
-                            eprintln!(
-                                "[SeedCoin] Node {:?}: Failed to generate own seed share: {:?}. \
-                                 Failing seed gen.",
-                                self.hbbft_own_id, e
-                            );
-                            self.seed_generation_state = SeedGenerationState::SeedGenerationFailed;
-                            return CoinOutput::empty();
-                        }
+                    } else {
+                        eprintln!(
+                            "[SeedCoin] Node {}: Not in canonical signer set; will not produce a \
+                             share but can aggregate.",
+                            self.hbbft_own_id
+                        );
+                    }
+
+                    self.seed_generation_state = SeedGenerationState::AwaitingSeedShares {
+                        seed_signing_package,
+                        actual_seed_package_participants: canonical_signers,
+                        own_seed_nonces,
+                        own_seed_share_bytes,
+                        received_seed_shares,
+                    };
+
+                    if let SeedGenerationState::AwaitingSeedShares {
+                        own_seed_share_bytes: Some(share_bytes),
+                        ..
+                    } = &self.seed_generation_state
+                    {
+                        return CoinOutput::with_share(share_bytes.clone());
+                    } else {
+                        return CoinOutput::empty();
                     }
                 } else {
-                    // Not all commitments received yet, update state with what we have
+                    // Not enough canonical commitments yet; keep waiting.
                     self.seed_generation_state = SeedGenerationState::AwaitingSeedCommitments {
                         own_seed_nonces,
                         own_seed_commitments,
                         received_seed_commitments,
                     };
                 }
-                return CoinOutput::empty(); // No coin decided yet
+                return CoinOutput::empty();
             }
             SeedGenerationState::AwaitingSeedShares {
                 seed_signing_package,
-                own_seed_nonces, // Keep for state consistency
+                actual_seed_package_participants,
+                own_seed_nonces,
                 own_seed_share_bytes,
                 mut received_seed_shares,
             } => {
-                if !self
-                    .seed_participants
-                    .contains(&sender_frost_id)
-                {
-                    // Technically, shares only matter from `min_signers_for_seed`
+                // Only accept shares from the selected participants in this signing package.
+                if !actual_seed_package_participants.contains(&sender_frost_id) {
                     eprintln!(
-                        "[SeedCoin] Received SEED share from non-participant FROST ID: \
-                         {sender_frost_id:?}"
+                        "[SeedCoin] Ignoring SEED share from {:?}: not in active signing set {:?}",
+                        sender_frost_id, actual_seed_package_participants
                     );
-                    return CoinOutput::empty(); // Do not update state based on non-participant
+                    return CoinOutput::empty();
+                }
+
+                // This arm expects a signature share (Round 2 for SEED)
+                // For secp256k1, a signature share (scalar) is 32 bytes.
+                if share_content.len() != 32 {
+                    eprintln!(
+                        "[SeedCoin] State AwaitingSeedShares: Received share with unexpected \
+                         length {} for a signature share (expected 32). Sender: {:?}",
+                        share_content.len(),
+                        sender_frost_id
+                    );
+                    return CoinOutput::empty();
                 }
 
                 let sig_share = match round2::SignatureShare::deserialize(&share_content) {
-                    Ok(s) => s,
+                    Ok(s) => s, // share_content is Vec<u8>, deserialize expects &[u8]
                     Err(e) => {
                         eprintln!("[SeedCoin] Failed to deserialize SEED share: {e:?}");
                         return CoinOutput::empty();
@@ -578,7 +740,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                 };
                 received_seed_shares.insert(sender_frost_id, sig_share);
                 eprintln!(
-                    "[SeedCoin] Node {:?}: SeedGen::AwaitingSeedShares received from \
+                    "[SeedCoin] Node {}: SeedGen::AwaitingSeedShares received from \
                      {sender_frost_id:?}. Total shares: {} of {} needed.",
                     self.hbbft_own_id,
                     received_seed_shares.len(),
@@ -587,20 +749,33 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
 
                 if received_seed_shares.len() >= self.min_signers_for_seed as usize {
                     eprintln!(
-                        "[SeedCoin] Node {:?}: Enough SEED shares received. Attempting to \
-                         aggregate SEED signature.",
+                        "[SeedCoin] Node {}: Enough SEED shares received. Attempting to aggregate \
+                         SEED signature.",
                         self.hbbft_own_id
                     );
-                    match self
-                        .aggregate_seed_signature(&seed_signing_package, &received_seed_shares)
-                    {
+                    match self.aggregate_seed_signature(
+                        &seed_signing_package,
+                        &received_seed_shares, // , &actual_seed_package_participants
+                    ) {
                         Ok(seed_signature) => {
+                            let serialized_seed_sig = match seed_signature.serialize() {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    eprintln!(
+                                        "[SeedCoin] Failed to serialize final SEED signature: \
+                                         {e:?}"
+                                    );
+                                    self.seed_generation_state =
+                                        SeedGenerationState::SeedGenerationFailed;
+                                    return CoinOutput::empty();
+                                }
+                            };
                             let mut hasher = Sha256::new();
-                            hasher.update(seed_signature.serialize().unwrap()); // Signature serialization should be infallible
+                            hasher.update(&serialized_seed_sig);
                             let seed_value: [u8; 32] = hasher.finalize().into();
                             let shared_seed = Arc::new(seed_value);
                             eprintln!(
-                                "[SeedCoin] Node {:?}: SEED Generated: {shared_seed:?}",
+                                "[SeedCoin] Node {}: SEED Generated: {shared_seed:?}",
                                 self.hbbft_own_id,
                             );
                             self.seed_generation_state =
@@ -616,8 +791,8 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                         }
                         Err(e) => {
                             eprintln!(
-                                "[SeedCoin] Node {:?}: SEED aggregation failed: {e:?}. Failing \
-                                 seed gen.",
+                                "[SeedCoin] Node {}: SEED aggregation failed: {e:?}. Failing seed \
+                                 gen.",
                                 self.hbbft_own_id
                             );
                             self.seed_generation_state = SeedGenerationState::SeedGenerationFailed;
@@ -628,6 +803,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
                     // Not enough shares for seed yet
                     self.seed_generation_state = SeedGenerationState::AwaitingSeedShares {
                         seed_signing_package,
+                        actual_seed_package_participants,
                         own_seed_nonces,
                         own_seed_share_bytes,
                         received_seed_shares,
@@ -776,6 +952,17 @@ pub fn run_seed_coin_integration_scenario() {
         all_frost_participants_sorted, // Needed for SeedBasedFrostCoin::new
     ) = setup_frost_for_seed_coin(n_hbbft as u16, seed_generation_threshold);
 
+    // Canonical signer set (first t FROST ids, identical on all nodes)
+    let canonical_signers: Vec<FrostIdentifier> = all_frost_participants_sorted
+        .iter()
+        .copied()
+        .take(seed_generation_threshold as usize)
+        .collect();
+    let canonical_signers_set: std::collections::BTreeSet<FrostIdentifier> = canonical_signers
+        .iter()
+        .copied()
+        .collect();
+
     // Share these structures among coin instances via Arc
     let shared_all_key_packages = Arc::new(all_key_packages_frost);
     let shared_group_pk = Arc::new(group_pk_pkg_frost);
@@ -875,6 +1062,7 @@ pub fn run_seed_coin_integration_scenario() {
         .enumerate()
         .take(n_hbbft)
     {
+        let mut round_1_output_for_node_i = CoinOutput::empty();
         // Submitting to coin[i]
         for j in 0..n_hbbft {
             // Share from coin[j]
@@ -882,13 +1070,27 @@ pub fn run_seed_coin_integration_scenario() {
                 continue;
             } // Don't submit its own share to itself via this
             println!("[Scenario] Node {i} submitting Node {j}'s SEED commitment share...");
-            let _val_opt = coin.submit_coin_share(
+            let output = coin.submit_coin_share(
                 epoch_seed_gen,
                 round_seed_gen, // These params are for the derived coin HBBFT wants
                 seed_commitments_shares[j].clone(),
                 hbbft_node_ids[j],
             );
-            // Coin not decided yet, still in commitment phase for seed
+            // If submitting a commitment caused this node to generate its Round 2 share,
+            // capture it for the next phase of the test.
+            if output.share_to_broadcast.is_some() {
+                // This node has now transitioned to AwaitingSeedShares and produced its R2
+                // share
+                round_1_output_for_node_i = output;
+            }
+        }
+        // If after receiving all other commitments, this node produced its R2 share,
+        // store it.
+        if let Some(_r2_share) = round_1_output_for_node_i.share_to_broadcast {
+            // This is node i's own R2 share, update seed_signature_shares[i]
+            // This assumes the test's seed_signature_shares was pre-filled or
+            // can be updated. For simplicity, let's assume the
+            // request_coin_value in the next block will get it.
         }
     }
     println!("[Scenario] All SEED commitments exchanged.");
@@ -898,6 +1100,8 @@ pub fn run_seed_coin_integration_scenario() {
 
     // Round 2: All N nodes request again, this time they should produce their
     // *signature shares* for the SEED
+    // This call is crucial as it allows nodes that transitioned to
+    // AwaitingSeedShares to output their R2 share.
     let mut seed_signature_shares: Vec<CoinShare> = Vec::new();
     for (i, coin) in coins
         .iter_mut()
@@ -906,16 +1110,45 @@ pub fn run_seed_coin_integration_scenario() {
     {
         println!("[Scenario] Node {i} requesting (triggers seed signature share)...");
         let output = coin.request_coin_value(epoch_seed_gen, round_seed_gen);
-        assert!(
-            output.share_to_broadcast.is_some(),
-            "Node {i} should produce a SEED signature share"
-        );
+
+        // Only canonical signers must produce a 32-byte share
+        let frost_id_i = *hbbft_to_frost_map_arc
+            .get(&hbbft_node_ids[i])
+            .unwrap();
+        if canonical_signers_set.contains(&frost_id_i) {
+            assert!(
+                output.share_to_broadcast.is_some(),
+                "Node {i} (signer) should produce a SEED signature share"
+            );
+            let share = output
+                .share_to_broadcast
+                .clone()
+                .unwrap();
+            assert_eq!(share.len(), 32, "Share from signer node {i} should be 32 bytes");
+            seed_signature_shares.push(share);
+        } else {
+            // Non-signers may not produce a share
+            assert!(
+                output.share_to_broadcast.is_none(),
+                "Node {i} (non-signer) should not produce a SEED signature share"
+            );
+        }
         assert!(
             output.decided_value.is_none(),
-            "SEED should not be generated yet by Node {i} after only its own share",
+            "SEED should not be generated yet by Node {i} after only its own (or no) share"
         );
-        seed_signature_shares.push(output.share_to_broadcast.unwrap());
     }
+    // Verify that all shares collected now are indeed signature shares (32 bytes)
+    for (idx, share) in seed_signature_shares.iter().enumerate() {
+        assert_eq!(
+            share.len(),
+            32,
+            "Share from node {} in R2 should be 32 bytes (signature share), got {}",
+            idx,
+            share.len()
+        );
+    }
+
     println!("[Scenario] All nodes produced SEED signature shares.");
 
     // Simulate broadcast of signature shares: each node submits other N-1 shares
@@ -931,25 +1164,31 @@ pub fn run_seed_coin_integration_scenario() {
         // Submitting to coin[i]
         // Submit enough shares to coin[i] to potentially complete the SEED
         let mut shares_submitted_count = 0;
-        for j in 0..n_hbbft {
+        for (j, peer_id) in hbbft_node_ids
+            .iter()
+            .enumerate()
+            .take(n_hbbft)
+        {
             if i == j {
-                // It already has its own share internally
-                shares_submitted_count += 1;
-                if shares_submitted_count >= seed_generation_threshold as usize
-                    && final_seed_derived_coin.is_none()
-                {
-                    // Check if it decided with its own share + others later
-                }
                 continue;
             }
-
+            // Only broadcast shares from canonical signers
+            let frost_id_j = *hbbft_to_frost_map_arc
+                .get(peer_id)
+                .unwrap();
+            if !canonical_signers_set.contains(&frost_id_j) {
+                continue;
+            }
             println!("[Scenario] Node {i} submitting Node {j}'s SEED signature share...");
-            let output = coin.submit_coin_share(
-                epoch_seed_gen,
-                round_seed_gen, // HBBFT's target coin
-                seed_signature_shares[j].clone(),
-                hbbft_node_ids[j],
-            );
+            // The index into seed_signature_shares corresponds to signer order in
+            // canonical_signers
+            let signer_pos = canonical_signers
+                .iter()
+                .position(|id| *id == frost_id_j)
+                .expect("signer frost id must be in canonical set");
+            let share = seed_signature_shares[signer_pos].clone();
+
+            let output = coin.submit_coin_share(epoch_seed_gen, round_seed_gen, share, *peer_id);
             shares_submitted_count += 1;
 
             if let Some(val) = output.decided_value {
@@ -960,8 +1199,7 @@ pub fn run_seed_coin_integration_scenario() {
                     assert_eq!(
                         final_seed_derived_coin,
                         Some(val),
-                        "All nodes should derive the same coin for epoch_seed_gen, round_seed_gen \
-                         once SEED is made"
+                        "All nodes should derive the same coin"
                     );
                 }
             }

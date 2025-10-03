@@ -245,37 +245,37 @@ where
                 if let Some(rbc_epoch_map) = self
                     .rbc_instances
                     .get_mut(&message_epoch)
+                    && let Some(rbc_instance) = rbc_epoch_map.get_mut(&proposer_id)
                 {
-                    if let Some(rbc_instance) = rbc_epoch_map.get_mut(&proposer_id) {
-                        let responses = rbc_instance.handle_message(&rbc_msg)?;
-                        for resp in responses {
-                            hbbft_output
+                    let responses = rbc_instance.handle_message(&rbc_msg)?;
+                    for resp in responses {
+                        hbbft_output
+                            .messages_to_send
+                            .push(HoneyBadgerMessage::Rbc(resp));
+                    }
+
+                    let output_already_recorded = self
+                        .rbc_outputs
+                        .get(&message_epoch)
+                        .is_some_and(|epoch_map| epoch_map.contains_key(&proposer_id));
+
+                    if !output_already_recorded
+                        && rbc_instance.is_decided()
+                        && let Some(decided_batch) = rbc_instance.output()
+                    {
+                        self.store_rbc_output(message_epoch, proposer_id, decided_batch);
+                        let aba_init_output: AbaProcessOutput<NodeId> =
+                            self.initiate_aba_for_rbc(message_epoch, proposer_id, true)?;
+                        hbbft_output.messages_to_send.extend(
+                            aba_init_output
                                 .messages_to_send
-                                .push(HoneyBadgerMessage::Rbc(resp));
-                        }
-
-                        let output_already_recorded = self
-                            .rbc_outputs
-                            .get(&message_epoch)
-                            .is_some_and(|epoch_map| epoch_map.contains_key(&proposer_id));
-
-                        if !output_already_recorded && rbc_instance.is_decided() {
-                            if let Some(decided_batch) = rbc_instance.output() {
-                                self.store_rbc_output(message_epoch, proposer_id, decided_batch);
-                                let aba_init_output: AbaProcessOutput<NodeId> =
-                                    self.initiate_aba_for_rbc(message_epoch, proposer_id, true)?;
-                                hbbft_output.messages_to_send.extend(
-                                    aba_init_output
-                                        .messages_to_send
-                                        .into_iter()
-                                        .map(HoneyBadgerMessage::Aba),
-                                );
-                                if let Some(timer_req) = aba_init_output.timer_request_to_set {
-                                    hbbft_output
-                                        .timer_requests_to_set
-                                        .push(timer_req);
-                                }
-                            }
+                                .into_iter()
+                                .map(HoneyBadgerMessage::Aba),
+                        );
+                        if let Some(timer_req) = aba_init_output.timer_request_to_set {
+                            hbbft_output
+                                .timer_requests_to_set
+                                .push(timer_req);
                         }
                     }
                 }
@@ -285,30 +285,24 @@ where
                 if let Some(aba_epoch_map) = self
                     .aba_instances
                     .get_mut(&message_epoch)
+                    && let Some(aba_instance) = aba_epoch_map.get_mut(&batch_proposer_id)
+                    && !aba_instance.is_decided()
                 {
-                    if let Some(aba_instance) = aba_epoch_map.get_mut(&batch_proposer_id) {
-                        if !aba_instance.is_decided() {
-                            let aba_proc_output = aba_instance.handle_message(&aba_msg)?;
-                            for resp in aba_proc_output.messages_to_send {
-                                hbbft_output
-                                    .messages_to_send
-                                    .push(HoneyBadgerMessage::Aba(resp));
-                            }
-                            if let Some(timer_req) = aba_proc_output.timer_request_to_set {
-                                hbbft_output
-                                    .timer_requests_to_set
-                                    .push(timer_req);
-                            }
-                            if aba_instance.is_decided() {
-                                if let Some(decided_value) = aba_instance.output() {
-                                    self.store_aba_output(
-                                        message_epoch,
-                                        batch_proposer_id,
-                                        decided_value,
-                                    );
-                                }
-                            }
-                        }
+                    let aba_proc_output = aba_instance.handle_message(&aba_msg)?;
+                    for resp in aba_proc_output.messages_to_send {
+                        hbbft_output
+                            .messages_to_send
+                            .push(HoneyBadgerMessage::Aba(resp));
+                    }
+                    if let Some(timer_req) = aba_proc_output.timer_request_to_set {
+                        hbbft_output
+                            .timer_requests_to_set
+                            .push(timer_req);
+                    }
+                    if aba_instance.is_decided()
+                        && let Some(decided_value) = aba_instance.output()
+                    {
+                        self.store_aba_output(message_epoch, batch_proposer_id, decided_value);
                     }
                 }
             }
@@ -371,23 +365,22 @@ where
                 batch_proposer_id,
                 round,
             } => {
-                if let Some(aba_epoch_map) = self.aba_instances.get_mut(&epoch) {
-                    if let Some(aba_instance) = aba_epoch_map.get_mut(&batch_proposer_id) {
-                        // Only process timeout if it's for the current round of an undecided ABA
-                        if !aba_instance.is_decided() && round == aba_instance.current_round_debug()
-                        {
-                            let aba_proc_output = aba_instance.handle_round_timeout(round)?;
-                            hbbft_output.messages_to_send.extend(
-                                aba_proc_output
-                                    .messages_to_send
-                                    .into_iter()
-                                    .map(HoneyBadgerMessage::Aba),
-                            );
-                            if let Some(timer_req) = aba_proc_output.timer_request_to_set {
-                                hbbft_output
-                                    .timer_requests_to_set
-                                    .push(timer_req);
-                            }
+                if let Some(aba_epoch_map) = self.aba_instances.get_mut(&epoch)
+                    && let Some(aba_instance) = aba_epoch_map.get_mut(&batch_proposer_id)
+                {
+                    // Only process timeout if it's for the current round of an undecided ABA
+                    if !aba_instance.is_decided() && round == aba_instance.current_round_debug() {
+                        let aba_proc_output = aba_instance.handle_round_timeout(round)?;
+                        hbbft_output.messages_to_send.extend(
+                            aba_proc_output
+                                .messages_to_send
+                                .into_iter()
+                                .map(HoneyBadgerMessage::Aba),
+                        );
+                        if let Some(timer_req) = aba_proc_output.timer_request_to_set {
+                            hbbft_output
+                                .timer_requests_to_set
+                                .push(timer_req);
                         }
                     }
                 }
@@ -604,15 +597,13 @@ where
         batch_proposer_id: NodeId,
         rbc_delivered_value: bool,
     ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
-        if let Some(aba_map) = self.aba_instances.get_mut(&epoch_num) {
-            if let Some(aba_instance) = aba_map.get_mut(&batch_proposer_id) {
-                if !aba_instance.is_decided()
-                    && aba_instance.current_round_debug() == 0
-                    && aba_instance.output().is_none()
-                {
-                    return aba_instance.propose(rbc_delivered_value);
-                }
-            }
+        if let Some(aba_map) = self.aba_instances.get_mut(&epoch_num)
+            && let Some(aba_instance) = aba_map.get_mut(&batch_proposer_id)
+            && !aba_instance.is_decided()
+            && aba_instance.current_round_debug() == 0
+            && aba_instance.output().is_none()
+        {
+            return aba_instance.propose(rbc_delivered_value);
         }
         Ok(AbaProcessOutput::default())
     }
@@ -819,22 +810,22 @@ where
             // is called before ensure_epoch_active_and_get_timers has run for this epoch.
             self.ensure_epoch_instances_internal(epoch_num);
 
-            if let Some(rbc_epoch_map) = self.rbc_instances.get_mut(&epoch_num) {
-                if let Some(our_rbc_instance) = rbc_epoch_map.get_mut(&self.own_id) {
-                    if !our_rbc_instance.is_initiated() && !our_rbc_instance.is_decided() {
-                        // DbgPrint!("[HBBFT] Node {} broadcasting own proposal for epoch {}",
-                        // self.own_id, epoch_num);
-                        match our_rbc_instance.propose(batch_to_propose) {
-                            Ok(rbc_messages) => {
-                                for rbc_msg in rbc_messages {
-                                    output
-                                        .messages_to_send
-                                        .push(HoneyBadgerMessage::Rbc(rbc_msg));
-                                }
-                            }
-                            Err(e) => return Err(e),
+            if let Some(rbc_epoch_map) = self.rbc_instances.get_mut(&epoch_num)
+                && let Some(our_rbc_instance) = rbc_epoch_map.get_mut(&self.own_id)
+                && !our_rbc_instance.is_initiated()
+                && !our_rbc_instance.is_decided()
+            {
+                // DbgPrint!("[HBBFT] Node {} broadcasting own proposal for epoch {}",
+                // self.own_id, epoch_num);
+                match our_rbc_instance.propose(batch_to_propose) {
+                    Ok(rbc_messages) => {
+                        for rbc_msg in rbc_messages {
+                            output
+                                .messages_to_send
+                                .push(HoneyBadgerMessage::Rbc(rbc_msg));
                         }
                     }
+                    Err(e) => return Err(e),
                 }
             }
         }

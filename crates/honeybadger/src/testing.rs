@@ -23,7 +23,7 @@ impl CommonCoin for DummyCommonCoin {
         // No shares to send, coin is immediately known
         CoinOutput {
             share_to_broadcast: None,
-            decided_value: Some(round % 2 == 0),
+            decided_value: Some(round.is_multiple_of(2)),
         }
     }
 
@@ -42,7 +42,7 @@ impl CommonCoin for DummyCommonCoin {
     }
 
     fn get_coin_for_round_fallback(&mut self, _epoch: EpochNum, round: AbaRound) -> bool {
-        round % 2 == 0 // Fallback is the same predictable logic
+        round.is_multiple_of(2) // Fallback is the same predictable logic
     }
 }
 
@@ -92,7 +92,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for MockInteractiveCoin<NodeId> {
 
         let decided_value = if shares_for_this_round.len() >= self.config.low_threshold() {
             // F+1 shares
-            Some(round % 2 == 0) // Deterministic coin outcome
+            Some(round.is_multiple_of(2)) // Deterministic coin outcome
         } else {
             None // Not enough shares yet
         };
@@ -104,7 +104,7 @@ impl<NodeId: NodeIdentifier> CommonCoin for MockInteractiveCoin<NodeId> {
     }
 
     fn get_coin_for_round_fallback(&mut self, _epoch: EpochNum, round: AbaRound) -> bool {
-        round % 2 == 0 // Fallback is the same predictable logic
+        round.is_multiple_of(2) // Fallback is the same predictable logic
     }
 }
 
@@ -437,28 +437,28 @@ where
         let mut outputs_to_process: Vec<(NodeId, HbbftProcessOutput<NodeId>)> = Vec::new();
 
         // Find the next timer to expire
-        if let Some((&expiry_time, _)) = self.timers.iter().next() {
-            if expiry_time <= self.current_time {
-                // Remove and process
-                if let Some((_, expiries)) = self.timers.pop_first() {
-                    for expiry_event in expiries {
-                        processed_timer = true;
-                        // Deliver expiry to the relevant node(s)
-                        // For ABA, it's specific to batch_proposer_id's ABA instance on each node.
-                        // For RBC, it's specific to proposer_id's RBC instance on each node.
-                        // The HBBFT instance itself will route it internally.
-                        for (id, node) in self.nodes.iter_mut() {
-                            if self.crashed_nodes.contains(id) {
-                                continue;
-                            } // Don't deliver timer expiries to crashed nodes
-                            match node
-                                .hbbft
-                                .handle_timer_expiry(expiry_event.clone())
-                            {
-                                Ok(output) => outputs_to_process.push((*id, output)),
-                                Err(e) => {
-                                    eprintln!("Error handling timer expiry for node {id}: {e:?}")
-                                }
+        if let Some((&expiry_time, _)) = self.timers.iter().next()
+            && expiry_time <= self.current_time
+        {
+            // Remove and process
+            if let Some((_, expiries)) = self.timers.pop_first() {
+                for expiry_event in expiries {
+                    processed_timer = true;
+                    // Deliver expiry to the relevant node(s)
+                    // For ABA, it's specific to batch_proposer_id's ABA instance on each node.
+                    // For RBC, it's specific to proposer_id's RBC instance on each node.
+                    // The HBBFT instance itself will route it internally.
+                    for (id, node) in self.nodes.iter_mut() {
+                        if self.crashed_nodes.contains(id) {
+                            continue;
+                        } // Don't deliver timer expiries to crashed nodes
+                        match node
+                            .hbbft
+                            .handle_timer_expiry(expiry_event.clone())
+                        {
+                            Ok(output) => outputs_to_process.push((*id, output)),
+                            Err(e) => {
+                                eprintln!("Error handling timer expiry for node {id}: {e:?}")
                             }
                         }
                     }
@@ -486,15 +486,15 @@ where
         }
         if !progress_made && !self.timers.is_empty() {
             // If no messages and timers exist, advance time to the next timer event.
-            if let Some((&next_timer_time, _)) = self.timers.iter().next() {
-                if next_timer_time > self.current_time {
-                    self.current_time = next_timer_time;
-                    // After advancing time, try processing timers again in the next step call
-                    // This ensures that if advancing time makes a timer current, it gets processed.
-                    // Or, we can call self.process_timers() here.
-                    if self.process_timers() {
-                        progress_made = true;
-                    }
+            if let Some((&next_timer_time, _)) = self.timers.iter().next()
+                && next_timer_time > self.current_time
+            {
+                self.current_time = next_timer_time;
+                // After advancing time, try processing timers again in the next step call
+                // This ensures that if advancing time makes a timer current, it gets processed.
+                // Or, we can call self.process_timers() here.
+                if self.process_timers() {
+                    progress_made = true;
                 }
             }
         }

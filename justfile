@@ -44,18 +44,27 @@ test *args="":
     fi
     
     # Run the tests with appropriate flags
-    RUST_LOG=${LOG_LEVEL} PROPTEST_CASES=25 cargo nextest --color always run --no-fail-fast \
+    RUST_LOG=${LOG_LEVEL} PROPTEST_CASES=25 cargo --locked nextest --color always run --no-fail-fast \
         $([[ -n "$TEST_NAME" ]] && echo "--nocapture" || echo "") \
         ${RUN_IGNORED} \
         --features "${FEATURES}" \
         $([[ -n "$TEST_NAME" ]] && echo "--filterset test(${TEST_NAME})" || echo "")
 
 lint:
-    cargo +nightly clippy --lib --tests -- -D warnings
-    cargo +nightly fmt --all -- --check
+    cargo +nightly --locked clippy --lib --tests -- -D warnings
+    cargo +nightly --locked fmt --all -- --check
 
 fmt:
-    cargo +nightly fmt --all
+    cargo +nightly --locked fmt --all
 
-demo scenario_name:
-    cargo run -p honeybadger-demo -- {{scenario_name}}
+fix:
+    cargo +nightly --locked clippy --fix --lib --tests --allow-dirty
+
+demo *scenario_name="":
+    #!/usr/bin/env bash
+    if [ -z "{{scenario_name}}" ]; then
+        cargo --locked run -p honeybadger-demo --help
+        exit 1
+    fi
+
+    cargo --locked run -p honeybadger-demo -- {{scenario_name}}

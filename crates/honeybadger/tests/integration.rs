@@ -931,21 +931,21 @@ fn aba_est_equivocation() {
             .map(|db| (db.proposer_id, db.batch.clone()))
             .collect();
 
-        if first_node_final_set.is_none() {
+        if let Some(first_set) = &first_node_final_set {
+            assert_eq!(
+                &current_decided_set, first_set,
+                "Node {node_id_check} has a different set of decided batches than other nodes. \
+                 Equivocation may have caused divergence."
+            );
+        } else {
             first_node_final_set = Some(current_decided_set.clone());
             println!(
                 "ABA EST Equivocation Test: Node {node_id_check} (first checked) decided on {} \
                  batches.",
                 node_output_for_epoch.len()
             );
-        } else {
-            assert_eq!(
-                &current_decided_set,
-                first_node_final_set.as_ref().unwrap(),
-                "Node {node_id_check} has a different set of decided batches than other nodes. \
-                 Equivocation may have caused divergence."
-            );
         }
+
         assert_eq!(
             node_output_for_epoch.len(),
             num_nodes,
@@ -1016,11 +1016,11 @@ fn rbc_timeout_proposer_silent() {
                 epoch,
                 proposer_id: timer_proposer_id,
             } = timer_expiry
+                && *epoch == epoch_to_test
+                && *timer_proposer_id == silent_proposer_id
             {
-                if *epoch == epoch_to_test && *timer_proposer_id == silent_proposer_id {
-                    rbc_timeout_found_for_silent_proposer = true;
-                    break;
-                }
+                rbc_timeout_found_for_silent_proposer = true;
+                break;
             }
         }
         if rbc_timeout_found_for_silent_proposer {
@@ -1174,11 +1174,12 @@ fn aba_round_timeout_and_recovery() {
                         batch_proposer_id: bp_id,
                         round,
                     } = timer_expiry
+                        && *epoch == epoch_to_test
+                        && *bp_id == proposer_id
+                        && *round == 0
                     {
-                        if *epoch == epoch_to_test && *bp_id == proposer_id && *round == 0 {
-                            aba_r0_timer_is_set_in_harness = true;
-                            break;
-                        }
+                        aba_r0_timer_is_set_in_harness = true;
+                        break;
                     }
                 }
                 if aba_r0_timer_is_set_in_harness {
@@ -1201,11 +1202,12 @@ fn aba_round_timeout_and_recovery() {
                     batch_proposer_id: bp_id,
                     round,
                 } = timer_expiry
+                    && *epoch == epoch_to_test
+                    && *bp_id == proposer_id
+                    && *round == 0
                 {
-                    if *epoch == epoch_to_test && *bp_id == proposer_id && *round == 0 {
-                        aba_r0_timer_is_set_in_harness = true;
-                        break;
-                    }
+                    aba_r0_timer_is_set_in_harness = true;
+                    break;
                 }
             }
             if aba_r0_timer_is_set_in_harness {

@@ -428,42 +428,38 @@ impl<NodeId: NodeIdentifier> ReliableBroadcast<NodeId> {
             .known_payloads
             .contains_key(&hash_to_check)
             && self.initial_echo_sent_for_hash == Some(hash_to_check)
-        {
-            if let Some(echo_senders_for_hash) = self
+            && let Some(echo_senders_for_hash) = self
                 .echo_msg_senders
                 .get(&hash_to_check)
-            {
-                // If N-F ECHOs for this hash (which we also ECHOed)
-                if echo_senders_for_hash.len() >= self.config.high_threshold() {
-                    self.ready_sent_for_hash = Some(hash_to_check);
-                    // Add our own READY to the count.
-                    self.ready_msg_senders
-                        .entry(hash_to_check)
-                        .or_default()
-                        .insert(self.own_id);
+        {
+            // If N-F ECHOs for this hash (which we also ECHOed)
+            if echo_senders_for_hash.len() >= self.config.high_threshold() {
+                self.ready_sent_for_hash = Some(hash_to_check);
+                // Add our own READY to the count.
+                self.ready_msg_senders
+                    .entry(hash_to_check)
+                    .or_default()
+                    .insert(self.own_id);
 
-                    responses.push(RbcMessage {
-                        pub_proposer_id: self.proposer_id,
-                        pub_epoch: self.epoch,
-                        pub_content: RbcMessageContent::Ready(hash_to_check),
-                        pub_sender_id: self.own_id,
-                    });
+                responses.push(RbcMessage {
+                    pub_proposer_id: self.proposer_id,
+                    pub_epoch: self.epoch,
+                    pub_content: RbcMessageContent::Ready(hash_to_check),
+                    pub_sender_id: self.own_id,
+                });
 
-                    // After sending READY, immediately check for delivery condition with our own
-                    // READY message.
-                    if self.accepted_hash.is_none() {
-                        if let Some(ready_senders_for_hash) = self
-                            .ready_msg_senders
-                            .get(&hash_to_check)
-                        {
-                            if ready_senders_for_hash.len() >= self.config.high_threshold() {
-                                // DbgPrint!("[RBC ({},{})] DELIVERED hash {:?} (triggered by own
-                                // READY with N-F total READYs)", self.proposer_id, self.epoch,
-                                // hash_to_check);
-                                self.accepted_hash = Some(hash_to_check);
-                            }
-                        }
-                    }
+                // After sending READY, immediately check for delivery condition with our own
+                // READY message.
+                if self.accepted_hash.is_none()
+                    && let Some(ready_senders_for_hash) = self
+                        .ready_msg_senders
+                        .get(&hash_to_check)
+                    && ready_senders_for_hash.len() >= self.config.high_threshold()
+                {
+                    // DbgPrint!("[RBC ({},{})] DELIVERED hash {:?} (triggered by own
+                    // READY with N-F total READYs)", self.proposer_id, self.epoch,
+                    // hash_to_check);
+                    self.accepted_hash = Some(hash_to_check);
                 }
             }
         }
