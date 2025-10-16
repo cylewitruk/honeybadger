@@ -459,8 +459,13 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
                         return self.start_next_round(Some(coin_value));
                     } else {
                         self.waiting_for_coin_in_round = Some(round);
-                        // Keep existing round timer; timeout path will re-arm
-                        // if needed.
+                        // Refresh the timeout now to enable re-broadcasts sooner.
+                        output.timer_request_to_set = Some(TimerRequest::SetAbaRoundTimeout {
+                            epoch: self.epoch,
+                            batch_proposer_id: self.batch_proposer_id,
+                            round,
+                            suggested_duration: self.config.default_aba_round_timeout,
+                        });
                     }
                 }
             } else {
@@ -940,7 +945,11 @@ mod tests {
             Some(0),
             "Should be waiting for coin in round 0"
         );
-        assert!(output.timer_request_to_set.is_none(), "No timer change; re-armed on timeout");
+        if let Some(TimerRequest::SetAbaRoundTimeout { round, .. }) = output.timer_request_to_set {
+            assert_eq!(round, 0, "Timer should be refreshed for the current round");
+        } else {
+            panic!("Expected timer refresh when consulting coin on ambiguous N-F AUX");
+        }
     }
 
     #[test]
