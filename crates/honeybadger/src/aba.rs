@@ -4,7 +4,7 @@
 //! whether to include a specific proposer's batch in the output for an epoch.
 //! Each potential proposer in an epoch has a corresponding ABA instance.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config::HoneyBadgerConfig;
@@ -410,48 +410,28 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
     ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         let mut output = AbaProcessOutput::default();
         if self.is_decided() {
-            return Ok(output); // Return the default, empty output
+            return Ok(output);
         }
 
         if let Some(auxs_for_round) = self.aux_values.get(&round) {
-            let mut aux_counts = HashMap::new(); // value -> count
-            for val in auxs_for_round.values() {
-                *aux_counts.entry(*val).or_insert(0) += 1;
-            }
+            let total_aux = auxs_for_round.len();
+            let high = self.config.high_threshold();
 
-            let mut current_conf_values = BTreeSet::new();
-            for (val, count) in &aux_counts {
-                if *count >= self.config.high_threshold() {
-                    // N-F AUX messages for value `val`
-                    current_conf_values.insert(*val);
+            if total_aux >= high {
+                // N-F AUX received in total; check unanimity
+                let mut values_present = std::collections::BTreeSet::new();
+                for v in auxs_for_round.values() {
+                    values_present.insert(*v);
                 }
-            }
 
-            if !current_conf_values.is_empty() {
-                // If |conf_values| == 1, say {v}, then decide v.
-                if current_conf_values.len() == 1 {
-                    let decided_val = *current_conf_values
-                        .iter()
-                        .next()
-                        .unwrap();
+                if values_present.len() == 1 {
+                    // Decide unanimous value
+                    let decided_val = *values_present.iter().next().unwrap();
                     self.decided_value = Some(decided_val);
                     self.decided_round = Some(round);
-                    // DbgPrint!("[ABA ({},{},R{})] DECIDED on {}", self.batch_proposer_id,
-                    // self.epoch, round, decided_val); Optionally, could
-                    // broadcast a DECIDE message or rely on others reaching same state.
-                    return Ok(AbaProcessOutput::default()); // Decided, no new messages or timer.
+                    return Ok(AbaProcessOutput::default());
                 } else {
-                    // current_conf_values.len() > 1
-                    // This case (multiple values having N-F AUX) should be impossible
-                    // with N >= 3F+1 and correct nodes, as it implies 2*(N-F) <= N,
-                    // which means N <= 2F, contradicting N >= 3F+1.
-                    // However, as a robust fallback, we can proceed to coin.
-                    eprintln!(
-                        "[DEBUG ABA try_decide R{round}] Ambiguous N-F conf_values (should be \
-                         impossible): {current_conf_values:?}. Requesting coin."
-                    );
-                    // self.batch_proposer_id, self.epoch, round, current_conf_values, round);
-
+                    // Ambiguous N-F AUX: consult the coin now
                     let coin_request_output = self
                         .coin
                         .request_coin_value(self.epoch, round);
@@ -471,35 +451,18 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
                     }
 
                     if let Some(coin_value) = coin_request_output.decided_value {
-                        // DbgPrint!("[ABA ({},{},R{})] Coin immediately available: {}. Starting
-                        // next round.", self.batch_proposer_id, self.epoch, round, coin_value);
                         return self.start_next_round(Some(coin_value));
                     } else {
                         self.waiting_for_coin_in_round = Some(round);
-                        // Timer for current round `round` should already be
-                        // running. We are now waiting
-                        // for Coin messages or timeout for this round.
+                        // Keep existing round timer; timeout path will re-arm
+                        // if needed.
                     }
                 }
             } else {
-                // current_conf_values is empty (no value has N-F AUX support)
-                // We simply wait for more AUX messages for the current round or for the round
-                // to time out. The timeout mechanism will consult the coin. F+1
-                // AUX support alone is not sufficient to consult the coin
-                // prematurely if a decision might still be reached
-                // with more messages in the current round.
-                eprintln!(
-                    "[DEBUG ABA try_decide R{round}] current_conf_values is empty. Waiting for \
-                     more AUX or timeout. Has F+1 AUX for any value: {}",
-                    aux_counts
-                        .values()
-                        .any(|&c| c >= self.config.low_threshold())
-                );
-                // If no N-F support and no F+1 support for any value, do
-                // nothing, wait for more messages or timeout.
+                // Fewer than N-F AUX: keep waiting for more AUX or timeout.
             }
         }
-        Ok(output) // Return the (potentially modified) output
+        Ok(output)
     }
 
     /// Handles a timeout for the current ABA round.
@@ -886,26 +849,54 @@ mod tests {
         assert_eq!(output.timer_request_to_set, None); // Decision means no new timer
     }
 
+    #[derive(Debug)]
+    struct NoDecideCoin;
+
+    impl CommonCoin for NoDecideCoin {
+        type NodeId = usize;
+
+        fn request_coin_value(&mut self, _epoch: EpochNum, _round: AbaRound) -> CoinOutput {
+            // Broadcast a share, but never decide immediately.
+            CoinOutput {
+                share_to_broadcast: Some(vec![0x01]),
+                decided_value: None,
+            }
+        }
+
+        fn submit_coin_share(
+            &mut self,
+            _epoch: EpochNum,
+            _round: AbaRound,
+            _share_content: CoinShare,
+            _sender_id: Self::NodeId,
+        ) -> CoinOutput {
+            CoinOutput::empty()
+        }
+    }
+
     #[test]
-    fn aba_handle_aux_f_plus_one_support_leads_to_coin() {
-        // Renamed for clarity
+    fn aba_aux_n_minus_f_total_ambiguous_triggers_coin_consultation() {
         let n = 4;
         let f = 1; // low_threshold = F+1 = 2; high_threshold = N-F = 3
         let config_node0 = create_test_config(n, f, 0);
-        let mut aba_node0 = create_aba_instance(Arc::clone(&config_node0), 0);
-        let _ = aba_node0.propose(true).unwrap(); // Node 0 EST(true,0)
+        // Use a coin that does NOT decide immediately, so we can assert "waiting"
+        // state.
+        let coin = Box::new(NoDecideCoin);
+        let mut aba_node0 = BinaryByzantineAgreement::new(
+            Arc::clone(&config_node0),
+            BATCH_PROPOSER_ID,
+            EPOCH_NUM,
+            0,
+            coin,
+        );
+        let _ = aba_node0.propose(true).unwrap(); // Establish round 0 context
 
-        // Setup:
-        // Node 0 sends AUX(true,0)
-        // Node 1 sends AUX(true,0) -> true has F+1 AUX
-        // Node 2 sends AUX(false,0)
-        // Node 3 sends AUX(false,0) -> false has F+1 AUX
-        // Neither has N-F AUX. Should go to coin.
+        // Setup: total AUX = 4 (>= N-F=3), but values are split {true,false}.
         aba_node0
             .aux_values
             .entry(0)
             .or_default()
-            .insert(0, true); // Own AUX (simulated)
+            .insert(0, true);
         aba_node0
             .aux_values
             .entry(0)
@@ -925,19 +916,26 @@ mod tests {
         let output = aba_node0
             .try_decide_or_advance_round(0)
             .unwrap();
-        // With the refactored logic, F+1 AUX support alone (without N-F support)
-        // does not immediately trigger a coin consultation or round advancement.
-        // The system waits for more AUX messages or a timeout for round 0.
-        assert_eq!(aba_node0.current_round, 0, "Round should not advance yet");
-        assert_eq!(aba_node0.current_estimate, Some(true), "Initial estimate should remain");
-        assert!(output.messages_to_send.is_empty(), "No messages should be sent immediately");
-        assert!(output.timer_request_to_set.is_none(), "No new timer should be set by this path");
+
+        // Expect immediate coin consultation:
+        // - a COIN share is broadcast
+        // - we remain in round 0 (coin not decided yet)
+        // - we mark waiting_for_coin_in_round
+        // - no new timer set here (timeout path re-arms)
         assert!(
-            aba_node0
-                .waiting_for_coin_in_round
-                .is_none(),
-            "Should not be waiting for coin yet via this path"
+            output
+                .messages_to_send
+                .iter()
+                .any(|m| matches!(m.pub_content, AbaMessageContent::Coin { round: 0, .. })),
+            "Expected to broadcast a COIN share when N-F AUX are ambiguous"
         );
+        assert_eq!(aba_node0.current_round, 0, "Round should not advance without coin decision");
+        assert_eq!(
+            aba_node0.waiting_for_coin_in_round,
+            Some(0),
+            "Should be waiting for coin in round 0"
+        );
+        assert!(output.timer_request_to_set.is_none(), "No timer change; re-armed on timeout");
     }
 
     #[test]
