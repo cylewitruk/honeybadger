@@ -58,20 +58,6 @@ pub trait CommonCoin: std::fmt::Debug + Send + Sync {
         share_content: CoinShare, // The content of the received coin share.
         sender_id: Self::NodeId,  // ID of the node that sent this share.
     ) -> CoinOutput;
-
-    /// Called when an ABA round has timed out and a coin value is mandatorily
-    /// needed to proceed to the next round. This method *must* return a
-    /// boolean.
-    ///
-    /// ## Arguments
-    ///
-    /// * `epoch`: The epoch number of the timed-out ABA round.
-    /// * `round`: The ABA round number that timed out.
-    ///
-    /// ## Returns
-    ///
-    /// A `bool` representing the determined coin value for the round.
-    fn get_coin_for_round_fallback(&mut self, epoch: EpochNum, round: AbaRound) -> bool;
 }
 
 /// Represents the state of a single Asynchronous Binary Byzantine Agreement
@@ -313,16 +299,12 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
                 }
             }
             AbaMessageContent::Coin { share, round } => {
-                if Some(*round) == self.waiting_for_coin_in_round && !self.is_decided() {
-                    // DbgPrint!("[ABA ({},{},R{})] Received CoinShare for waiting round {} from
-                    // {}", self.batch_proposer_id, self.epoch, self.current_round,
-                    // round, sender_id);
-                    let coin_submit_output = self.coin.submit_coin_share(
-                        self.epoch,
-                        *round,
-                        share.clone(), // CoinShare is Vec<u8>, cheap to clone
-                        sender_id,
-                    );
+                // Accept coin shares for the current round to help aggregate,
+                // regardless of whether we already timed out locally.
+                if *round == self.current_round && !self.is_decided() {
+                    let coin_submit_output =
+                        self.coin
+                            .submit_coin_share(self.epoch, *round, share.clone(), sender_id);
 
                     if let Some(share_to_send_by_coin) = coin_submit_output.share_to_broadcast {
                         output
@@ -332,21 +314,16 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
                                 pub_epoch: self.epoch,
                                 pub_content: AbaMessageContent::Coin {
                                     share: share_to_send_by_coin,
-                                    round: *round, /* Assuming coin's internal round maps to ABA
-                                                    * round */
+                                    round: *round,
                                 },
                                 pub_sender_id: self.own_id,
                             });
                     }
 
                     if let Some(coin_value) = coin_submit_output.decided_value {
-                        // DbgPrint!("[ABA ({},{},R{})] Coin decided via share: {}. Starting next
-                        // round.", self.batch_proposer_id, self.epoch,
-                        // self.current_round, coin_value);
                         self.waiting_for_coin_in_round = None;
-                        return self.start_next_round(Some(coin_value)); // Return directly
+                        return self.start_next_round(Some(coin_value));
                     }
-                    // Else, still waiting for more shares for this round.
                 }
             }
         }
@@ -525,9 +502,22 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
         Ok(output) // Return the (potentially modified) output
     }
 
-    /// Handles a timeout for a specific ABA round.
-    /// If the timeout is for the current, undecided round, it consults the coin
-    /// and starts the next round.
+    /// Handles a timeout for the current ABA round.
+    ///
+    /// If the timeout pertains to the current, undecided round, this method:
+    /// - Consults the common coin by invoking `request_coin_value(epoch,
+    ///   current_round)`.
+    /// - Broadcasts the node's coin share if one is returned by the coin.
+    /// - If the coin can be decided immediately, starts the next round with
+    ///   that value.
+    /// - Otherwise, records that we are waiting for the coin in this round and
+    ///   re-arms the round timeout to allow re-broadcasts in lossy/slow
+    ///   networks.
+    ///
+    /// Note: Timeouts do not force a local decision; they trigger progress
+    /// toward one by starting or continuing the coin phase. Incoming `COIN`
+    /// messages for the current round are still accepted via
+    /// `handle_message` and may complete the coin without another timeout.
     ///
     /// ## Arguments
     ///
@@ -535,28 +525,57 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
     ///
     /// ## Returns
     ///
-    /// * `Ok(AbaProcessOutput)`: Contains messages and timer requests if a new
-    ///   round is started. Returns a default empty output if the instance is
-    ///   already decided or the timeout is not for the current round.
+    /// * `Ok(AbaProcessOutput)`: Contains any `COIN` messages to send and
+    ///   possibly a timer request. Returns a default, empty output if the
+    ///   instance is already decided or the timeout does not pertain to the
+    ///   current round.
     /// * `Err(HbbftError)`: If an error occurs while starting the next round.
     pub fn handle_round_timeout(
         &mut self,
         round_that_timed_out: AbaRound,
     ) -> Result<AbaProcessOutput<NodeId>, HbbftError<NodeId>> {
         if self.is_decided() || round_that_timed_out != self.current_round {
-            // Already decided, or timeout is for a past/future round we are not currently
-            // in.
             return Ok(AbaProcessOutput::default());
         }
 
-        // DbgPrint!("[ABA ({},{},R{})] Round {} TIMED OUT. Consulting coin.",
-        // self.batch_proposer_id, self.epoch, self.current_round,
-        // round_that_timed_out);
-        let coin_val = self
+        let mut output = AbaProcessOutput::default();
+
+        // Initiate/continue the coin for the current round.
+        let coin_output = self
             .coin
-            .get_coin_for_round_fallback(self.epoch, self.current_round);
-        self.waiting_for_coin_in_round = None; // No longer waiting for this timed-out round's coin
-        self.start_next_round(Some(coin_val))
+            .request_coin_value(self.epoch, self.current_round);
+
+        if let Some(share) = coin_output.share_to_broadcast {
+            output
+                .messages_to_send
+                .push(AbaMessage {
+                    pub_batch_proposer_id: self.batch_proposer_id,
+                    pub_epoch: self.epoch,
+                    pub_content: AbaMessageContent::Coin {
+                        share,
+                        round: self.current_round,
+                    },
+                    pub_sender_id: self.own_id,
+                });
+        }
+
+        if let Some(coin_value) = coin_output.decided_value {
+            self.waiting_for_coin_in_round = None;
+            return self.start_next_round(Some(coin_value));
+        }
+
+        // Still waiting for t shares: keep waiting for Coin messages.
+        self.waiting_for_coin_in_round = Some(self.current_round);
+
+        // Refresh the timeout to allow re-broadcasts if the network is lossy/slow.
+        output.timer_request_to_set = Some(TimerRequest::SetAbaRoundTimeout {
+            epoch: self.epoch,
+            batch_proposer_id: self.batch_proposer_id,
+            round: self.current_round,
+            suggested_duration: self.config.default_aba_round_timeout,
+        });
+
+        Ok(output)
     }
 
     /// Advances the ABA instance to the next round.
@@ -746,10 +765,12 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::*;
     use crate::testing::{DummyCommonCoin, create_test_config};
+    use crate::types::CoinOutput;
 
     const BATCH_PROPOSER_ID: usize = 0;
     const EPOCH_NUM: EpochNum = 1;
@@ -994,5 +1015,101 @@ mod tests {
         if let Some(TimerRequest::SetAbaRoundTimeout { round, .. }) = output.timer_request_to_set {
             assert_eq!(round, 1);
         }
+    }
+
+    #[derive(Debug)]
+    struct SlowThresholdCoin {
+        // Decide once we’ve seen shares from `threshold_total - 1` distinct peers
+        // (assuming we have already broadcast our own share on timeout).
+        threshold_total: usize,
+        received_from: BTreeSet<usize>,
+        share_bytes: Vec<u8>,
+        // Fixed coin bit for simplicity in the test
+        coin_bit: bool,
+    }
+
+    impl Default for SlowThresholdCoin {
+        fn default() -> Self {
+            Self {
+                threshold_total: 2,
+                received_from: BTreeSet::new(),
+                share_bytes: vec![0xCC],
+                coin_bit: true,
+            }
+        }
+    }
+
+    impl CommonCoin for SlowThresholdCoin {
+        type NodeId = usize;
+
+        fn request_coin_value(&mut self, _epoch: EpochNum, _round: AbaRound) -> CoinOutput {
+            // Broadcast our share; never decide immediately.
+            CoinOutput {
+                share_to_broadcast: Some(self.share_bytes.clone()),
+                decided_value: None,
+            }
+        }
+
+        fn submit_coin_share(
+            &mut self,
+            _epoch: EpochNum,
+            _round: AbaRound,
+            _share_content: CoinShare,
+            sender_id: Self::NodeId,
+        ) -> CoinOutput {
+            self.received_from.insert(sender_id);
+            // Decide once we have enough distinct peers; assume our own share is already
+            // out.
+            if self.received_from.len() + 1 >= self.threshold_total {
+                CoinOutput {
+                    share_to_broadcast: None,
+                    decided_value: Some(self.coin_bit),
+                }
+            } else {
+                CoinOutput::empty()
+            }
+        }
+    }
+
+    #[test]
+    fn aba_timeout_broadcasts_coin_and_waits_then_finishes_on_shares() {
+        let config = create_test_config(4, 1, 0);
+        // Use the slow coin that requires an extra peer share to decide.
+        let coin = Box::new(SlowThresholdCoin {
+            threshold_total: 2,
+            ..Default::default()
+        });
+        let mut aba = BinaryByzantineAgreement::new(Arc::clone(&config), 0, 0, 0, coin);
+
+        // Start round 0 with an initial proposal.
+        let _ = aba.propose(true).unwrap();
+
+        // Timeout triggers coin request: broadcast our share, but do NOT decide yet.
+        let out = aba.handle_round_timeout(0).unwrap();
+        assert!(
+            out.messages_to_send
+                .iter()
+                .any(|m| matches!(m.pub_content, AbaMessageContent::Coin { round: 0, .. })),
+            "Expected to broadcast a COIN share on timeout"
+        );
+        assert_eq!(aba.current_round, 0, "Should still be in round 0 while waiting for shares");
+        assert_eq!(aba.waiting_for_coin_in_round, Some(0), "Should be waiting for coin in round 0");
+
+        // Now deliver one peer COIN share for round 0; this should complete the coin
+        // and advance.
+        let peer_coin_msg = AbaMessage {
+            pub_batch_proposer_id: 0,
+            pub_epoch: 0,
+            pub_content: AbaMessageContent::Coin { share: vec![0xAA], round: 0 },
+            pub_sender_id: 1, // distinct peer
+        };
+        let _ = aba
+            .handle_message(&peer_coin_msg)
+            .unwrap();
+
+        assert_eq!(aba.current_round, 1, "Should advance to round 1 after coin decision");
+        assert!(aba.waiting_for_coin_in_round.is_none(), "Should clear waiting_for_coin flag");
+        // And an EST for round 1 should be emitted by start_next_round (not
+        // asserted here).
     }
 }

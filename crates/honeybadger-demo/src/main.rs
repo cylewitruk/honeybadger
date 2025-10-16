@@ -9,9 +9,6 @@
 //!
 //! ## Running the Demonstration:
 //!
-//! If `honeybadger-demo` is a binary crate with a `src/main.rs` that calls
-//! `honeybadger_demo::run_cli_scenarios()`, you can run it via:
-//!
 //! ```bash
 //! cargo run -- [SCENARIO_NAME]
 //! ```
@@ -489,28 +486,6 @@ impl<NodeId: NodeIdentifier> CommonCoin for FrostThresholdCoin<NodeId> {
             }
         }
         CoinOutput::empty()
-    }
-
-    fn get_coin_for_round_fallback(&mut self, epoch: EpochNum, round: AbaRound) -> bool {
-        let coin_key = (epoch, round);
-        if let Some(&value) = self.reconstructed_coins.get(&coin_key) {
-            return value;
-        }
-
-        let mut hasher = Sha256::new();
-        hasher.update(b"hbbft-coin-fallback-salt");
-        hasher.update(epoch.to_le_bytes());
-        hasher.update(round.to_le_bytes());
-        let hash_result = hasher.finalize();
-        let fallback_value = hash_result[0] % 2 == 0;
-
-        self.reconstructed_coins
-            .insert(coin_key, fallback_value);
-        eprintln!(
-            "[FrostCoin Fallback] epoch: {epoch}, round: {round}. Using fallback value: \
-             {fallback_value}",
-        );
-        fallback_value
     }
 }
 

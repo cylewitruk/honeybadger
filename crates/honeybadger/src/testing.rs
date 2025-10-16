@@ -40,10 +40,6 @@ impl CommonCoin for DummyCommonCoin {
             decided_value: None,
         }
     }
-
-    fn get_coin_for_round_fallback(&mut self, _epoch: EpochNum, round: AbaRound) -> bool {
-        round.is_multiple_of(2) // Fallback is the same predictable logic
-    }
 }
 
 /// A mock common coin that requires F+1 shares to decide.
@@ -101,10 +97,6 @@ impl<NodeId: NodeIdentifier> CommonCoin for MockInteractiveCoin<NodeId> {
             share_to_broadcast: None, // submit_coin_share in this mock doesn't trigger new shares
             decided_value,
         }
-    }
-
-    fn get_coin_for_round_fallback(&mut self, _epoch: EpochNum, round: AbaRound) -> bool {
-        round.is_multiple_of(2) // Fallback is the same predictable logic
     }
 }
 

@@ -815,55 +815,6 @@ impl<NodeId: NodeIdentifier> CommonCoin for SeedBasedFrostCoin<NodeId> {
         }
         CoinOutput::empty()
     }
-
-    fn get_coin_for_round_fallback(&mut self, epoch: EpochNum, round: AbaRound) -> bool {
-        let hbbft_epoch_round_key = (epoch, round);
-
-        // Prefer to use the cryptographic SEED if it was successfully generated
-        if let SeedGenerationState::SeedGenerated(seed) = &self.seed_generation_state {
-            if let Some(&value) = self
-                .reconstructed_derived_coins
-                .get(&hbbft_epoch_round_key)
-            {
-                return value;
-            }
-            let value = Self::derive_coin_from_seed(seed, epoch, round);
-            self.reconstructed_derived_coins
-                .insert(hbbft_epoch_round_key, value);
-            eprintln!(
-                "[SeedCoin Fallback WITH SEED] epoch: {epoch}, round: {round}. Using derived \
-                 value: {value}",
-            );
-            return value;
-        }
-
-        // Fallback to deterministic non-crypto method if SEED generation failed or not
-        // complete
-        if let Some(&value) = self
-            .reconstructed_derived_coins
-            .get(&hbbft_epoch_round_key)
-        {
-            return value; // Should have been cached if seed was used
-        }
-
-        let mut hasher = Sha256::new();
-        hasher.update(b"hbbft-seed-coin-fallback-salt"); // Different salt
-        hasher.update(epoch.to_le_bytes());
-        hasher.update(round.to_le_bytes());
-        // To make it deterministic per node, even in fallback (though HBBFT expects
-        // same fallback from all) Let's ensure this fallback is truly common,
-        // so don't include node ID here.
-        let hash_result = hasher.finalize();
-        let fallback_value = hash_result[0] % 2 == 0;
-
-        self.reconstructed_derived_coins
-            .insert(hbbft_epoch_round_key, fallback_value);
-        eprintln!(
-            "[SeedCoin Fallback NO SEED] epoch: {epoch}, round: {round}. Using salt-based \
-             fallback: {fallback_value}",
-        );
-        fallback_value
-    }
 }
 
 type FrostSeedCoinSetup = (
