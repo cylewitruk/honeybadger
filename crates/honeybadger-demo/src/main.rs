@@ -50,7 +50,21 @@ use honeybadger::{
 use honeybadger::{CoinFactory, CommonCoin};
 use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
-// No direct `secp256k1` crate import needed
+
+#[ctor::ctor]
+fn setup_logging() {
+    use std::sync::Once;
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::{EnvFilter, Registry};
+
+    static START: Once = Once::new();
+    START.call_once(|| {
+        // Enable Arkworks constraint tracing (idempotent if already set)
+        let subscriber = Registry::default().with(EnvFilter::from_default_env());
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
 
 /// Module for testing utilities, kept internal to this demonstration library.
 mod testing_utils {
@@ -58,7 +72,7 @@ mod testing_utils {
 
     use honeybadger::CoinFactory;
 
-    use super::*; // To get NodeIdentifier, HoneyBadgerConfigBuilder etc.
+    use super::*;
 
     /// A simple NodeId type for testing and demonstration.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -557,6 +571,22 @@ pub fn setup_frost_participants(
     )
 }
 
+/// Scenario: "integration"
+///
+/// Demonstrates a minimal FROST-based `CommonCoin` with:
+/// - Deterministic per-(epoch,round,participant) commitments to avoid round-1
+///   exchange
+/// - Threshold t = F+1 (from HBBFT configuration)
+/// - Two participating nodes produce shares; aggregation yields a boolean
+/// - Caching: subsequent requests return the decided value and no new share
+///
+/// Run:
+/// - `cargo run -- integration`
+/// - `just demo integration`
+///
+/// Expected:
+/// - Both nodes decide the same coin value for the same (epoch, round)
+/// - No new shares after decision (cached)
 pub fn run_integration_scenario() {
     println!("\n--- Running Integration Scenario ---");
     let n_hbbft: usize = 4; // Used for clarity, though create_test_config_with_node_ids infers from all_node_ids_vec
@@ -738,149 +768,6 @@ pub fn run_integration_scenario() {
     println!("Node 0 subsequent request returns cached value.");
 }
 
-/// Runs the fallback scenario for the FROST common coin.
-pub fn run_fallback_scenario() {
-    println!("\n--- Running Fallback Scenario ---");
-    let n_hbbft: usize = 4;
-    let f_hbbft: usize = 1;
-    let min_frost_signers: u16 = (f_hbbft + 1) as u16;
-    let hbbft_node_ids: Vec<DemoNodeId> = (0..n_hbbft).map(DemoNodeId).collect();
-
-    // 1. Setup FROST participants and initial data structures
-    let (
-        raw_all_key_packages_frost,
-        raw_group_pk_pkg_frost, // Changed to PublicKeyPackage
-        raw_hbbft_to_frost_map_btreemap,
-    ) = setup_frost_participants(n_hbbft as u16, min_frost_signers);
-
-    let raw_hbbft_to_frost_map: HashMap<DemoNodeId, FrostIdentifier> =
-        raw_hbbft_to_frost_map_btreemap
-            .into_iter()
-            .collect();
-    // 2. Wrap shared data in Arc
-    let all_key_packages_frost_arc = Arc::new(raw_all_key_packages_frost);
-    let group_pk_pkg_frost_arc = Arc::new(raw_group_pk_pkg_frost); // Changed variable name
-    let hbbft_to_frost_map_arc = Arc::new(raw_hbbft_to_frost_map);
-
-    // 3. Create CoinFactory: closure captures Arcs
-    let factory_all_key_packages_arc = Arc::clone(&all_key_packages_frost_arc);
-    let factory_group_pk_arc = Arc::clone(&group_pk_pkg_frost_arc);
-    let factory_hbbft_map_arc = Arc::clone(&hbbft_to_frost_map_arc);
-
-    let coin_factory_fn = Arc::new(
-        move |hbbft_node_id: DemoNodeId,
-              _epoch: EpochNum,
-              config_for_coin: Arc<HoneyBadgerConfig<DemoNodeId>>| {
-            let local_frost_id = *factory_hbbft_map_arc
-                .get(&hbbft_node_id)
-                .expect("HBBFT ID not in FROST map for factory");
-            let local_key_pkg = factory_all_key_packages_arc
-                .get(&local_frost_id)
-                .expect("FROST ID not in key packages for factory")
-                .clone();
-
-            Box::new(FrostThresholdCoin::new(
-                config_for_coin,
-                hbbft_node_id,
-                local_frost_id,
-                local_key_pkg,
-                (*factory_group_pk_arc).clone(), // Use PublicKeyPackage
-                (*factory_all_key_packages_arc).clone(),
-                (*factory_hbbft_map_arc).clone(),
-            )) as Box<dyn CommonCoin<NodeId = DemoNodeId>>
-        },
-    );
-    let demo_coin_factory = CoinFactory::new(coin_factory_fn);
-
-    // 4. Create HBBFT configuration for node 0
-    let config0_hbbft = create_test_config_with_node_ids(
-        f_hbbft,
-        hbbft_node_ids.clone(),
-        hbbft_node_ids[0],
-        demo_coin_factory.clone(),
-    );
-
-    // 5. Create FrostThresholdCoin instance for direct testing (coin0)
-    let frost_id0 = *hbbft_to_frost_map_arc
-        .get(&hbbft_node_ids[0])
-        .unwrap();
-    let key_pkg0 = all_key_packages_frost_arc
-        .get(&frost_id0)
-        .unwrap()
-        .clone();
-    let mut coin0 = FrostThresholdCoin::new(
-        Arc::clone(&config0_hbbft),
-        hbbft_node_ids[0],
-        frost_id0,
-        key_pkg0,
-        (*group_pk_pkg_frost_arc).clone(), // Use PublicKeyPackage
-        (*all_key_packages_frost_arc).clone(),
-        (*hbbft_to_frost_map_arc).clone(),
-    );
-
-    let epoch: EpochNum = 5;
-    let round: AbaRound = 3;
-
-    println!("Node 0 requesting coin (epoch {epoch}, round {round})...");
-    let output = coin0.request_coin_value(epoch, round);
-    assert!(output.share_to_broadcast.is_some(), "Node 0 should produce a share for fallback test");
-    assert!(output.decided_value.is_none(), "Coin should be undecided initially in fallback test");
-    println!("Node 0 produced share. Coin undecided.");
-
-    println!("Simulating ABA timeout, Node 0 calls get_coin_for_round_fallback...");
-    let fallback_val = coin0.get_coin_for_round_fallback(epoch, round);
-    println!("Node 0 fallback value: {fallback_val}");
-
-    let output_after_fallback = coin0.request_coin_value(epoch, round);
-    assert!(
-        output_after_fallback
-            .share_to_broadcast
-            .is_none(),
-        "No new share should be produced after fallback decision"
-    );
-    assert_eq!(
-        output_after_fallback.decided_value,
-        Some(fallback_val),
-        "Subsequent request should return cached fallback value"
-    );
-    println!("Node 0 subsequent request returns cached fallback value.");
-
-    // Create HBBFT configuration for node 1 (for coin1 instance)
-    let config1_hbbft = create_test_config_with_node_ids(
-        f_hbbft,
-        hbbft_node_ids.clone(),
-        hbbft_node_ids[1],
-        demo_coin_factory.clone(),
-    );
-
-    // Create FrostThresholdCoin instance for direct testing (coin1)
-    let frost_id1 = *hbbft_to_frost_map_arc
-        .get(&hbbft_node_ids[1])
-        .unwrap();
-    let key_pkg1 = all_key_packages_frost_arc
-        .get(&frost_id1)
-        .unwrap()
-        .clone();
-    let mut coin1 = FrostThresholdCoin::new(
-        Arc::clone(&config1_hbbft),
-        hbbft_node_ids[1],
-        frost_id1,
-        key_pkg1,
-        (*group_pk_pkg_frost_arc).clone(), // Use PublicKeyPackage
-        (*all_key_packages_frost_arc).clone(),
-        (*hbbft_to_frost_map_arc).clone(),
-    );
-
-    println!("Simulating ABA timeout for Node 1, calls get_coin_for_round_fallback...");
-    let fallback_val_node1 = coin1.get_coin_for_round_fallback(epoch, round);
-    println!("Node 1 fallback value: {fallback_val_node1}");
-    assert_eq!(
-        fallback_val_node1, fallback_val,
-        "Fallback should be deterministic across instances"
-    );
-    println!("SUCCESS: Node 1 fallback value matches Node 0's fallback value.");
-}
-
 /// Parses command-line arguments and runs the selected scenario.
 /// This function would typically be called from `src/main.rs`.
 pub fn main() {
@@ -893,14 +780,10 @@ pub fn main() {
 
     match args[1].as_str() {
         "integration" => run_integration_scenario(),
-        "fallback" => run_fallback_scenario(),
         "seeded-integration" => frost_seed::run_seed_coin_integration_scenario(),
-        "seeded-fallback" => frost_seed::run_seed_coin_fallback_scenario(),
         _ => {
             println!("Unknown scenario: {}", args[1]);
-            println!(
-                "Available scenarios: integration, fallback, seeded-integration, seeded-fallback"
-            );
+            println!("Available scenarios: integration, seeded-integration");
         }
     }
 }

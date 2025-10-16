@@ -927,6 +927,25 @@ pub fn setup_frost_for_seed_coin(
 
 // --- Scenarios (Illustrative - will need adaptation for new Coin type) ---
 
+/// Scenario: "seeded-integration"
+///
+/// End-to-end demonstration of the SEED-based coin:
+/// - Round 1: all N nodes broadcast FROST commitments for the fixed SEED
+///   message
+/// - Canonical signer set (size t = N - F) is selected deterministically
+/// - Round 2: only canonical signers produce signature shares; others aggregate
+/// - SEED is produced once any node collects t valid shares
+/// - Subsequent (epoch, round) coins are derived from SEED without more signing
+///
+/// Run:
+/// - `cargo run -- seeded-integration`
+/// - `just demo seeded-integration`
+///
+/// Expected:
+/// - Nodes log formation of the canonical signing package
+/// - Non-canonical shares are ignored with a clear log
+/// - SEED bytes identical on all nodes; derived coin matches across nodes
+/// - Later derived coins require no new shares
 pub fn run_seed_coin_integration_scenario() {
     println!("\n--- Running Seed-Based Coin Integration Scenario ---");
     let n_hbbft: usize = 4;
@@ -1270,155 +1289,4 @@ pub fn run_seed_coin_integration_scenario() {
         "SUCCESS: All nodes derived the same coin value for ({epoch_derived},{round_derived}): \
          {first_derived_val}",
     );
-}
-
-pub fn run_seed_coin_fallback_scenario() {
-    println!("\n--- Running Seed-Based Coin Fallback Scenario (BEFORE SEED) ---");
-    let n_hbbft: usize = 4;
-    let f_hbbft: usize = 1;
-    let seed_generation_threshold: u16 = (n_hbbft - f_hbbft) as u16;
-    if seed_generation_threshold < 2 {
-        panic!("Seed generation threshold too low for FROST (needs >=2)");
-    }
-
-    let hbbft_node_ids: Vec<DemoNodeId> = (0..n_hbbft).map(DemoNodeId).collect();
-
-    let (
-        all_key_packages_frost,
-        group_pk_pkg_frost,
-        hbbft_to_frost_map_arc,
-        all_frost_participants_sorted,
-    ) = setup_frost_for_seed_coin(n_hbbft as u16, seed_generation_threshold);
-
-    let shared_all_key_packages = Arc::new(all_key_packages_frost);
-    let shared_group_pk = Arc::new(group_pk_pkg_frost);
-    let shared_all_frost_participants = Arc::new(all_frost_participants_sorted);
-
-    let shared_all_key_packages_clone = Arc::clone(&shared_all_key_packages);
-    let shared_group_pk_clone = Arc::clone(&shared_group_pk);
-    let hbbft_to_frost_map_arc_clone = Arc::clone(&hbbft_to_frost_map_arc);
-    let shared_all_frost_participants_clone = Arc::clone(&shared_all_frost_participants);
-    let coin_factory_fn = Arc::new(
-        // ... same factory as above ...
-        move |hbbft_node_id: DemoNodeId,
-              _epoch: EpochNum,
-              config_for_coin: Arc<HoneyBadgerConfig<DemoNodeId>>| {
-            let local_frost_id = *hbbft_to_frost_map_arc_clone
-                .get(&hbbft_node_id)
-                .expect("HBBFT ID not in FROST map for factory (seed coin)");
-            let local_key_pkg = shared_all_key_packages_clone
-                .get(&local_frost_id)
-                .expect("FROST ID not in key packages for factory (seed coin)")
-                .clone();
-
-            Box::new(SeedBasedFrostCoin::new(
-                config_for_coin,
-                hbbft_node_id,
-                local_frost_id,
-                local_key_pkg,
-                (*shared_group_pk_clone).clone(),
-                hbbft_to_frost_map_arc_clone.clone(),
-                (*shared_all_frost_participants_clone).clone(),
-            )) as Box<dyn CommonCoin<NodeId = DemoNodeId>>
-        },
-    );
-    let seed_coin_factory = CoinFactory::new(coin_factory_fn);
-
-    let config0 = create_test_config_with_node_ids(
-        f_hbbft,
-        hbbft_node_ids.clone(),
-        hbbft_node_ids[0],
-        seed_coin_factory.clone(),
-    );
-    let frost_id0 = *hbbft_to_frost_map_arc
-        .get(&hbbft_node_ids[0])
-        .unwrap();
-    let key_pkg0 = shared_all_key_packages
-        .get(&frost_id0)
-        .unwrap()
-        .clone();
-
-    let mut coin0 = SeedBasedFrostCoin::new(
-        config0,
-        hbbft_node_ids[0],
-        frost_id0,
-        key_pkg0,
-        (*shared_group_pk).clone(),
-        hbbft_to_frost_map_arc.clone(),
-        (*shared_all_frost_participants).clone(),
-    );
-
-    let epoch_fallback: EpochNum = 20;
-    let round_fallback: AbaRound = 2;
-
-    // Node 0 requests, initiates seed generation but doesn't complete it
-    println!("[Scenario] Node 0 requesting (initiates seed commitment)...");
-    let output = coin0.request_coin_value(epoch_fallback, round_fallback);
-    assert!(output.share_to_broadcast.is_some(), "Should produce seed commitment share");
-    assert!(output.decided_value.is_none(), "Coin should be undecided");
-
-    println!(
-        "[Scenario] Simulating timeout, Node 0 calls get_coin_for_round_fallback for \
-         ({epoch_fallback},{round_fallback})...",
-    );
-    let fallback_val0 = coin0.get_coin_for_round_fallback(epoch_fallback, round_fallback);
-    println!(
-        "[Scenario] Node 0 fallback (NO SEED) value for ({epoch_fallback},{round_fallback}): \
-         {fallback_val0}"
-    );
-
-    // Verify subsequent call to request returns the fallback if seed still not made
-    let output_after = coin0.request_coin_value(epoch_fallback, round_fallback);
-    // State might still be AwaitingSeedCommitments or AwaitingSeedShares, so it
-    // might still return its share The value, however, should be the fallback
-    // value *if HBBFT calls get_coin_for_round_fallback* and this
-    // instance caches that fallback decision for the specific (epoch,round).
-    // Let's refine: get_coin_for_round_fallback *does* cache its result.
-    assert_eq!(
-        output_after.decided_value,
-        Some(fallback_val0),
-        "After fallback, value should be cached"
-    );
-
-    // Now, create another coin instance and have it go to fallback for the same
-    // HBBFT epoch/round
-    let config1 = create_test_config_with_node_ids(
-        f_hbbft,
-        hbbft_node_ids.clone(),
-        hbbft_node_ids[1],
-        seed_coin_factory,
-    );
-    let frost_id1 = *hbbft_to_frost_map_arc
-        .get(&hbbft_node_ids[1])
-        .unwrap();
-    let key_pkg1 = shared_all_key_packages
-        .get(&frost_id1)
-        .unwrap()
-        .clone();
-
-    let mut coin1 = SeedBasedFrostCoin::new(
-        config1,
-        hbbft_node_ids[1],
-        frost_id1,
-        key_pkg1,
-        (*shared_group_pk).clone(),
-        hbbft_to_frost_map_arc.clone(),
-        (*shared_all_frost_participants).clone(),
-    );
-    println!(
-        "[Scenario] Simulating timeout for Node 1, calls get_coin_for_round_fallback for \
-         ({epoch_fallback},{round_fallback})...",
-    );
-    let fallback_val1 = coin1.get_coin_for_round_fallback(epoch_fallback, round_fallback);
-    println!(
-        "[Scenario] Node 1 fallback (NO SEED) value for ({epoch_fallback},{round_fallback}): \
-         {fallback_val1}",
-    );
-
-    assert_eq!(
-        fallback_val0, fallback_val1,
-        "Fallback value (NO SEED) must be deterministic and same for all nodes for same \
-         epoch/round"
-    );
-    println!("SUCCESS: Fallback (NO SEED) values match for Node 0 and Node 1.");
 }
