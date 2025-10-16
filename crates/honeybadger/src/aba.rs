@@ -359,31 +359,36 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
         }
 
         if let Some(ests_for_round) = self.est_values.get(&round) {
-            let mut counts = HashMap::new(); // value -> count
+            let mut count_true = 0usize;
+            let mut count_false = 0usize;
             for val in ests_for_round.values() {
-                *counts.entry(*val).or_insert(0) += 1;
+                if *val {
+                    count_true += 1;
+                } else {
+                    count_false += 1;
+                }
             }
 
-            for (val, count) in counts {
-                if count >= self.config.low_threshold() {
-                    // F+1 ESTs for value `val`
-                    // We don't change self.current_estimate here.
-                    // self.current_estimate is for *our* EST proposal for the current round.
-                    // The value `val` is what we are sending in AUX.
-                    self.sent_aux.insert(round, true);
-                    output
-                        .messages_to_send
-                        .push(AbaMessage {
-                            pub_batch_proposer_id: self.batch_proposer_id,
-                            pub_epoch: self.epoch,
-                            pub_content: AbaMessageContent::Aux { value: val, round },
-                            pub_sender_id: self.own_id,
-                        });
-                    // In many ABAs, you only send one AUX per round.
-                    // A correct node sends AUX for the first such value it observes.
-                    // Our loop structure and `break` achieve this.
-                    break;
-                }
+            let low = self.config.low_threshold();
+            // Deterministic preference: true first, then false
+            let chosen = if count_true >= low {
+                Some(true)
+            } else if count_false >= low {
+                Some(false)
+            } else {
+                None
+            };
+
+            if let Some(val) = chosen {
+                self.sent_aux.insert(round, true);
+                output
+                    .messages_to_send
+                    .push(AbaMessage {
+                        pub_batch_proposer_id: self.batch_proposer_id,
+                        pub_epoch: self.epoch,
+                        pub_content: AbaMessageContent::Aux { value: val, round },
+                        pub_sender_id: self.own_id,
+                    });
             }
         }
         Ok(output)
