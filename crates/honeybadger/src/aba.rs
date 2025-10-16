@@ -105,6 +105,8 @@ pub struct BinaryByzantineAgreement<NodeId> {
     decided_round: Option<AbaRound>,
     // Indicates the round for which we are currently waiting for enough coin shares.
     waiting_for_coin_in_round: Option<AbaRound>,
+    /// Queued COIN shares for future rounds within the configured window.
+    queued_coin_shares: HashMap<AbaRound, Vec<(NodeId, CoinShare)>>,
 }
 
 impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
@@ -143,6 +145,7 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
             decided_value: None,
             decided_round: None,
             waiting_for_coin_in_round: None,
+            queued_coin_shares: HashMap::new(),
         }
     }
 
@@ -324,7 +327,17 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
                         self.waiting_for_coin_in_round = None;
                         return self.start_next_round(Some(coin_value));
                     }
+                } else if *round > self.current_round {
+                    if *round <= self.current_round + self.config.aba_max_future_round_window {
+                        self.queued_coin_shares
+                            .entry(*round)
+                            .or_default()
+                            .push((sender_id, share.clone()));
+                    } else {
+                        // Too far in the future; drop.
+                    }
                 }
+                // Implicitly ignore older-round COIN messages if not decided.
             }
         }
 
@@ -698,7 +711,6 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
         combined_output
             .messages_to_send
             .extend(aux_output.messages_to_send);
-        // try_send_aux doesn't set timers or decide on its own.
 
         // Try to decide or advance round based on current AUXs (which might include
         // previously queued ones for this round)
@@ -709,6 +721,38 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
         // This one can set a timer if it starts a new round, or clear it (None) if it
         // decides.
         combined_output.timer_request_to_set = decide_output.timer_request_to_set;
+
+        // Feed any queued COIN shares for the current round.
+        if !self.is_decided()
+            && let Some(mut queued) = self
+                .queued_coin_shares
+                .remove(&self.current_round)
+        {
+            for (sender, share) in queued.drain(..) {
+                let coin_out =
+                    self.coin
+                        .submit_coin_share(self.epoch, self.current_round, share, sender);
+
+                if let Some(rebroadcast) = coin_out.share_to_broadcast {
+                    combined_output
+                        .messages_to_send
+                        .push(AbaMessage {
+                            pub_batch_proposer_id: self.batch_proposer_id,
+                            pub_epoch: self.epoch,
+                            pub_content: AbaMessageContent::Coin {
+                                share: rebroadcast,
+                                round: self.current_round,
+                            },
+                            pub_sender_id: self.own_id,
+                        });
+                }
+
+                if let Some(bit) = coin_out.decided_value {
+                    // If coin decides while draining, start next round immediately.
+                    return self.start_next_round(Some(bit));
+                }
+            }
+        }
 
         // After processing, prune data for rounds strictly before the current one.
         self.prune_past_round_data(self.current_round);
@@ -739,7 +783,7 @@ impl<NodeId: NodeIdentifier> BinaryByzantineAgreement<NodeId> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::testing::{DummyCommonCoin, create_test_config};
@@ -1006,6 +1050,105 @@ mod tests {
             .iter()
             .any(|m| matches!(m.pub_content, AbaMessageContent::Aux { round: 1, .. }));
         assert!(!has_aux_r1);
+    }
+
+    #[derive(Debug)]
+    struct QueueProbeCoin {
+        // Shared log for test assertions
+        submits: Arc<Mutex<Vec<AbaRound>>>,
+    }
+
+    impl QueueProbeCoin {
+        fn new(submits: Arc<Mutex<Vec<AbaRound>>>) -> Self {
+            Self { submits }
+        }
+    }
+
+    impl CommonCoin for QueueProbeCoin {
+        type NodeId = usize;
+
+        fn request_coin_value(&mut self, _epoch: EpochNum, _round: AbaRound) -> CoinOutput {
+            // Broadcast our share; do not decide immediately.
+            CoinOutput {
+                share_to_broadcast: Some(vec![0x11]),
+                decided_value: None,
+            }
+        }
+
+        fn submit_coin_share(
+            &mut self,
+            _epoch: EpochNum,
+            round: AbaRound,
+            _share_content: CoinShare,
+            _sender_id: Self::NodeId,
+        ) -> CoinOutput {
+            self.submits.lock().unwrap().push(round);
+            // Decide only for round 0 (to advance to round 1 in the test). For other
+            // rounds, just record the submit and don't decide.
+            if round == 0 {
+                CoinOutput {
+                    share_to_broadcast: None,
+                    decided_value: Some(true),
+                }
+            } else {
+                CoinOutput::empty()
+            }
+        }
+    }
+
+    #[test]
+    fn aba_queued_future_coin_shares_are_processed_on_round_start() {
+        let config = create_test_config(4, 1, 0);
+
+        // Shared log for assertions, avoids trait-object downcast.
+        let submits_log = Arc::new(Mutex::new(Vec::<AbaRound>::new()));
+        let coin = Box::new(QueueProbeCoin::new(Arc::clone(&submits_log)));
+
+        let mut aba = BinaryByzantineAgreement::new(
+            Arc::clone(&config),
+            BATCH_PROPOSER_ID,
+            EPOCH_NUM,
+            0,
+            coin,
+        );
+
+        // Start round 0.
+        let _ = aba.propose(true).unwrap();
+
+        // While still in round 0, receive a COIN share for round 1 (future).
+        let future_coin_msg = AbaMessage {
+            pub_batch_proposer_id: BATCH_PROPOSER_ID,
+            pub_epoch: EPOCH_NUM,
+            pub_content: AbaMessageContent::Coin { share: vec![0xAB], round: 1 },
+            pub_sender_id: 2,
+        };
+        let out = aba
+            .handle_message(&future_coin_msg)
+            .unwrap();
+        assert!(out.messages_to_send.is_empty());
+
+        // Now deliver one COIN share for round 0 so the coin decides and we advance to
+        // round 1.
+        let r0_coin_msg = AbaMessage {
+            pub_batch_proposer_id: BATCH_PROPOSER_ID,
+            pub_epoch: EPOCH_NUM,
+            pub_content: AbaMessageContent::Coin { share: vec![0xAA], round: 0 },
+            pub_sender_id: 1,
+        };
+        let _ = aba
+            .handle_message(&r0_coin_msg)
+            .unwrap();
+
+        // We should have advanced to round 1.
+        assert_eq!(aba.current_round_debug(), 1);
+
+        // The queued round-1 COIN share should have been drained and submitted to the
+        // coin.
+        let submits = submits_log.lock().unwrap().clone();
+        assert!(
+            submits.contains(&1),
+            "Queued COIN share for round 1 was not processed on round start"
+        );
     }
 
     #[test]
